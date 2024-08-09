@@ -26,7 +26,7 @@ UNAME := $(shell uname -m)
 ARCH ?= $(UNAME)
 SUPPORTED_ARCH = false
 LICENSEDIR := $(OUTDIR)/license-files
-VERSION := $(shell git describe --match 'v[0-9]*' --dirty='.modified' --always --tags)
+VERSION ?= $(shell git describe --match 'v[0-9]*' --dirty='.modified' --always --tags)
 GITCOMMIT := $(shell git rev-parse HEAD)$(shell test -z "$(git status --porcelain)" || echo .m)
 LDFLAGS = "-w -X $(PACKAGE)/pkg/version.Version=$(VERSION) -X $(PACKAGE)/pkg/version.GitCommit=$(GITCOMMIT)"
 MIN_MACOS_VERSION ?= 11.0
@@ -64,7 +64,7 @@ all: arch-test finch install.finch-core-dependencies finch.yaml networks.yaml co
 
 .PHONY: install.finch-core-dependencies
 install.finch-core-dependencies:
-	OUTDIR=$(OUTDIR) "$(MAKE)" -C $(FINCH_CORE_DIR) install.dependencies
+	OUTDIR=$(OUTDIR) ARCH=$(ARCH) "$(MAKE)" -C $(FINCH_CORE_DIR) install.dependencies
 
 .PHONY: finch.yaml
 finch.yaml: $(OS_OUTDIR)/finch.yaml
@@ -183,7 +183,7 @@ download-licenses:
 	curl https://raw.githubusercontent.com/golangci/golangci-lint-action/master/LICENSE --output "$(LICENSEDIR)/github.com/golangci/golangci-lint-action/LICENSE"
 	mkdir -p "$(LICENSEDIR)/github.com/avto-dev/markdown-lint"
 	curl https://raw.githubusercontent.com/avto-dev/markdown-lint/master/LICENSE --output "$(LICENSEDIR)/github.com/avto-dev/markdown-lint/LICENSE"
-	mkdir -p "$(LICENSEDIR)"/github.com/ludeeus/action-shellcheck"
+	mkdir -p "$(LICENSEDIR)/github.com/ludeeus/action-shellcheck"
 	curl https://raw.githubusercontent.com/ludeeus/action-shellcheck/blob/2.0.0/LICENSE --output "$(LICENSEDIR)/github.com/ludeeus/action-shellcheck/LICENSE"
 
     ### dependencies in ci.yaml - end ###
