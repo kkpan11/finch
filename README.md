@@ -27,6 +27,9 @@ The project will in the near future have a more full set of documentation and tu
 
 ### Installing Finch
 
+> [!IMPORTANT]
+> Please note that Finch is a developer tool and is not meant for use in production environments, especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.
+
 #### macOS
 
 To get started with Finch on macOS, the prerequisites are:
@@ -61,6 +64,14 @@ INFO[0000] Initializing and starting Finch virtual machine...
 ..
 INFO[0067] Finch virtual machine started successfully
 ```
+
+#### Linux
+
+To get started with Finch on Linux, the prerequisites are:
+
+* Linux system capable of running containerd 1.7.x (generally, this means at least Linux kernel 4.x)
+
+Currently, Finch installers are packaged and distributed on Amazon Linux. If you are not using Amazon Linux, you can download the binary from the GitHub releases page and install/configure the dependencies, following the convention in the [finch.spec file](./contrib/packaging/rpm/finch.spec). Detailed instructions are available on [runfinch.com](https://runfinch.com/docs/managing-finch/linux/installation/#generic).
 
 ### Running containers and building images
 
@@ -113,15 +124,17 @@ Finch has a simple and extensible configuration.
 
 A configuration file at `${HOME}/.finch/finch.yaml` will be generated on first run. Currently, this config file has options for system resource limits for the underlying virtual machine. These default limits are generated dynamically based on the resources available on the host system, but can be changed by manually editing the config file.
 
-For a full list of configuration options, check [the struct here](https://github.com/runfinch/finch/blob/main/pkg/config/config.go#L34).
+For a full list of configuration options, check the finch struct for [macOS](pkg/config/config_darwin.go#L32).
 
 An example `finch.yaml` looks like this:
 
 ```yaml
 # cpus: the amount of vCPU to dedicate to the virtual machine. (required)
 cpus: 4
+
 # memory: the amount of memory to dedicate to the virtual machine. (required)
 memory: 4GiB
+
 # snapshotters: the snapshotters a user wants to use (the first snapshotter will be set as the default snapshotter)
 # Supported Snapshotters List:
 # - soci https://github.com/awslabs/soci-snapshotter/tree/main
@@ -132,24 +145,47 @@ memory: 4GiB
 # and remove the snapshotter configuration in the containerd config file found at /etc/containerd/config.toml
 snapshotters: 
     - soci
-# creds_helpers: a list of credential helpers that will be installed and configured automatically. 
-# Supported Credential Helpers List: 
+
+# creds_helpers: a list of credential helpers which can be used by Finch's container runtime stack. (optional)
+#
+# Finch currently supports Linux based credential helpers through its guest machine for macOS and Windows or natively
+# for Linux. All credential helpers are expected to have `docker-credential-*` naming convention.
+# Finch provides two modes of operation for credential helpers: managed and bring-your-own.
+#
+# Managed credential helpers:
+# Managed credential helpers are installed and configured by Finch. This means the credential helper binary will be downloaded
+# to the host machine and a config.json will be created and configured inside the $HOME/.finch directory if it does not already exist.
+# Finch will ensure the credential helper binary is made available to its container runtime stack with no additional action required by
+# the user.
+#
+# Supported list of managed credential helpers: 
 # - ecr-login https://github.com/awslabs/amazon-ecr-credential-helper
-# Once the option has been set the credential helper will be installed on either finch vm init or finch vm start. 
-# The binary will be downloaded on the host machine and a config.json will be created and populated inside the ~/.finch/ folder 
-# if it doesn't already exist. If it already exists, the value of credsStore will be overwritten. 
-# To opt out of using the credential helper, remove the value from the credsStore parameter of config.json 
-# and remove the creds_helper value from finch.yaml. 
-# To completely remove the credential helper, either remove the binary from ~/.finch/creds-helpers or remove the creds-helpers
-# folder entirely. (optional)
+#
+# Bring-your-own credential helpers:
+# Finch does offer support for users to bring their own credential helpers. In this use-case, users will still configure
+# the credential helper in finch.yaml similar to a managed credential helper; however, unlike managed credential helpers
+# users will also need to provide the credential helper binary through $HOME/.finch/cred-helpers. Finch will ensure
+# this binary is available to the container runtime stack in the guest machine. Note: Finch currently only supports
+# guest credential helper integration, therefore users will need to provide Linux credential helper binaries. Host
+# credential helper support is not yet available.
+#
+# For both managed and bring-your-own credential helpers, once configured in finch.yaml the user will need to run
+# finch vm init or finch vm start for the configuration to take affect. To remove credential helper integration, users
+# should remove the credential helper's configuration in $HOME/.finch/config.json and the creds_helpers configuration
+# from finch.yaml. To completely remove the credential helper, either remove the binary from $HOME/.finch/creds-helpers or
+# remove the directory entirely.
 creds_helpers: 
   - ecr-login
+
 # additional_directories: the work directories that are not supported by default. In macOS, only home directory is supported by default. 
 # For example, if you want to mount a directory into a container, and that directory is not under your home directory, 
 # then you'll need to specify this field to add that directory or any ascendant of it as a work directory. (optional)
+# Note: If your username doesn't match your home directory name, you may need to add '/Users/<username>' here to avoid permission issues.
 additional_directories:
   # the path of each additional directory.
+  # - path: /Users/<username>  # Uncomment and replace <username> if needed
   - path: /Volumes
+
 # vmType: sets which Hypervisor to use to launch the VM. (optional)
 # Only takes effect when a new VM is launched (only on vm init).
 # One of: "qemu", "vz".
@@ -159,6 +195,7 @@ additional_directories:
 # NOTE: prior to version 1.2.0, "qemu" was the default, and it will still be the default for
 # macOS versions that do not support Virtualization.framework (pre-13.0.0).
 vmType: "vz"
+
 # rosetta: sets whether to enable Rosetta as the binfmt_misc handler for x86_64 
 # binaries inside the VM, as an alternative to qemu user mode emulation. (optional)
 # Only takes effect when a new VM is launched (only on vm init).
@@ -169,13 +206,24 @@ vmType: "vz"
 # some performance regressions, as noted in this issue:
 # https://github.com/lima-vm/lima/issues/1269
 rosetta: false
+
+# dockercompat: a configuration parameter to activate finch functionality to accept Docker-like commands and arguments.
+# For running DevContainers on Finch, this functionality will convert Docker-like arguments into compatible nerdctl commands and arguments.
+dockercompat: true
+
+# experimental: enable experimental features (optional)
+#
+# Supported features:
+# - mountInotify https://lima-vm.io/docs/config/mount/#mount-inotify
+experimental:
+    mountInotify: true
 ```
 
 #### Windows
 
 A configuration file at `$env:LOCALAPPDATA\.finch\finch.yaml` will be generated on first run. Currently, this config file does not have options for system resource [limits due to limitations in WSL](https://github.com/microsoft/WSL/issues/8570).
 
-For a full list of configuration options, check [the struct here](pkg/config/config.go#L30).
+For a full list of configuration options, check the finch struct for [windows](pkg/config/config_windows.go#L18).
 
 An example `finch.yaml` looks like this:
 
@@ -190,6 +238,7 @@ An example `finch.yaml` looks like this:
 # and remove the snapshotter configuration in the containerd config file found at /etc/containerd/config.toml
 snapshotters: 
     - soci
+
 # creds_helpers: a list of credential helpers that will be installed and configured automatically. 
 # Supported Credential Helpers List: 
 # - ecr-login https://github.com/awslabs/amazon-ecr-credential-helper
@@ -205,6 +254,17 @@ creds_helpers:
 
 # sets wsl2 Hypervisor to use to launch the VM. (optional)
 vmType: "wsl2"
+
+# dockercompat: a configuration parameter to activate finch functionality to accept Docker-like commands and arguments.
+# For running DevContainers on Finch, this functionality will convert Docker-like arguments into compatible nerdctl commands and arguments.
+dockercompat: true
+
+# experimental: experimental features to enable (optional)
+#
+# Supported features:
+# - mountInotify https://lima-vm.io/docs/config/mount/#mount-inotify
+experimental:
+    mountInotify: true
 ```
 
 ### FAQ
@@ -225,6 +285,14 @@ LIMA_HOME=/Applications/Finch/lima/data /Applications/Finch/lima/bin/limactl she
 wsl -d lima-finch
 ```
 
+### Debugging
+
+See [Debugging Finch](./docs/debug.md) for common debugging scenarios.
+
+## Versioning
+
+Finch makes a best effort to follow [semantic versioning](https://semver.org/). Generally speaking, all minor version upgrades should be backwards compatible. With that said, we do not make any guarantees. Please let us know if anything breaks!
+
 ## What's next?
 
 We are excited to start this project in the open, and we'd love to hear from you. If you have ideas or find bugs please open an issue. Please feel free to start a discussion if you have something you'd like to propose or brainstorm. Pull requests are welcome, as well! See the [CONTRIBUTING](CONTRIBUTING.md) doc for more info on contributing, and the path to reviewer and maintainer roles for those interested.
@@ -238,3 +306,9 @@ As the project gets a bit of momentum, maintainers will start creating milestone
 * Stability and usability improvement, ongoing
 
 If you'd like to chat with us, please find us in the `#finch` channel on the [CNCF slack](https://cloud-native.slack.com).
+
+# Reporting an issue
+
+If you encounter anything that seems wrong, please check out our [issues](https://github.com/runfinch/finch/issues) tab first — someone may have already encountered your problem! If it's there, please add to the existing issue thread.
+
+If you can't find an existing issue, feel free to open a new one. As a remninder, anything related to security should NOT go through regular reporting channels. Please refer to [Security](https://github.com/runfinch/finch?tab=security-ov-file#reporting-security-issues) for guidance on how to report such issues.

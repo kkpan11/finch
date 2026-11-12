@@ -5,7 +5,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,8 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/runfinch/finch/pkg/command"
+	"github.com/runfinch/finch/pkg/config"
 	"github.com/runfinch/finch/pkg/flog"
-	"github.com/runfinch/finch/pkg/lima"
 	"github.com/runfinch/finch/pkg/templates"
 	"github.com/runfinch/finch/pkg/version"
 )
@@ -46,12 +45,18 @@ Server:
 {{- end}}
 {{- end}}`
 
-func newVersionCommand(limaCmdCreator command.LimaCmdCreator, logger flog.Logger, stdOut io.Writer) *cobra.Command {
+func newVersionCommand(
+	limaCmdCreator command.NerdctlCmdCreator,
+	logger flog.Logger,
+	stdOut io.Writer,
+	vmAutoStarter VMAutoStarter,
+	fc *config.Finch,
+) *cobra.Command {
 	versionCommand := &cobra.Command{
 		Use:   "version",
 		Args:  cobra.NoArgs,
 		Short: "Shows Finch version information",
-		RunE:  newVersionAction(limaCmdCreator, logger, stdOut).runAdapter,
+		RunE:  newVersionAction(limaCmdCreator, logger, stdOut, vmAutoStarter, fc).runAdapter,
 	}
 
 	versionCommand.Flags().StringP("format", "f", "", "Format the output using the given Go template, e.g, '{{json .}}'")
@@ -60,9 +65,11 @@ func newVersionCommand(limaCmdCreator command.LimaCmdCreator, logger flog.Logger
 }
 
 type versionAction struct {
-	creator command.LimaCmdCreator
-	logger  flog.Logger
-	stdOut  io.Writer
+	creator       command.NerdctlCmdCreator
+	logger        flog.Logger
+	stdOut        io.Writer
+	vmAutoStarter VMAutoStarter
+	fc            *config.Finch
 }
 
 // NerdctlVersionOutput captures the nerdctl version.
@@ -108,8 +115,14 @@ type NerdctlServerOutput struct {
 	Components []NerdctlComponentsOutput `json:"Components"`
 }
 
-func newVersionAction(creator command.LimaCmdCreator, logger flog.Logger, stdOut io.Writer) *versionAction {
-	return &versionAction{creator: creator, logger: logger, stdOut: stdOut}
+func newVersionAction(
+	creator command.NerdctlCmdCreator,
+	logger flog.Logger,
+	stdOut io.Writer,
+	vmAutoStarter VMAutoStarter,
+	fc *config.Finch,
+) *versionAction {
+	return &versionAction{creator: creator, logger: logger, stdOut: stdOut, vmAutoStarter: vmAutoStarter, fc: fc}
 }
 
 func (va *versionAction) runAdapter(cmd *cobra.Command, _ []string) error {
@@ -123,7 +136,10 @@ func (va *versionAction) runAdapter(cmd *cobra.Command, _ []string) error {
 
 func (va *versionAction) run(format string) error {
 	if err := va.printVersion(format); err != nil {
-		fmt.Fprintf(va.stdOut, "Finch version:\t%s\n", version.Version)
+		_, inErr := fmt.Fprintf(va.stdOut, "Finch version:\t%s\n", version.Version)
+		if inErr != nil {
+			return errors.Join(err, inErr)
+		}
 		return err
 	}
 	return nil
@@ -165,40 +181,6 @@ func (va *versionAction) showVersionMessage(tmpl *template.Template, nerdctlVers
 		return err
 	}
 	if _, err := fmt.Fprintln(va.stdOut, b.String()); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (va *versionAction) printVersion(format string) error {
-	status, err := lima.GetVMStatus(va.creator, va.logger, limaInstanceName)
-	if err != nil {
-		return fmt.Errorf("failed to get VM status: %w", err)
-	}
-	if status != lima.Running {
-		return errors.New("detailed version info is unavailable because VM is not running")
-	}
-	// Add -E to sudo command in order to preserve existing environment variables, more info:
-	// https://stackoverflow.com/questions/8633461/how-to-keep-environment-variables-when-using-sudo/8633575#8633575
-	limaArgs := []string{"shell", limaInstanceName, "sudo", "-E", "nerdctl", "version", "--format", "json"}
-	out, err := va.creator.CreateWithoutStdio(limaArgs...).Output()
-	if err != nil {
-		return fmt.Errorf("failed to create the nerdctl version command: %w", err)
-	}
-
-	var nerdctlVersion NerdctlVersionOutput
-	err = json.Unmarshal(out, &nerdctlVersion)
-	if err != nil {
-		return fmt.Errorf("failed to JSON-unmarshal the nerdctl version output: %w", err)
-	}
-
-	tmpl, err := newVersionTemplate(format)
-	if err != nil {
-		return err
-	}
-	err = va.showVersionMessage(tmpl, nerdctlVersion)
-	if err != nil {
 		return err
 	}
 

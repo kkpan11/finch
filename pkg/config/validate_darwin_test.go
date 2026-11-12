@@ -7,11 +7,13 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"github.com/docker/go-units"
 	"github.com/stretchr/testify/require"
 	"github.com/xorcare/pointer"
+	"go.uber.org/mock/gomock"
 
 	"github.com/runfinch/finch/pkg/mocks"
 )
@@ -28,8 +30,10 @@ func TestValidate(t *testing.T) {
 		{
 			name: "happy path",
 			cfg: &Finch{
-				CPUs:   pointer.Int(4),
-				Memory: pointer.String("4GiB"),
+				SystemSettings: SystemSettings{
+					CPUs:   pointer.Int(4),
+					Memory: pointer.String("4GiB"),
+				},
 			},
 			mockSvc: func(_ *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
 				deps.EXPECT().NumCPU().Return(8)
@@ -41,8 +45,10 @@ func TestValidate(t *testing.T) {
 		{
 			name: "config specifies less CPUs than required",
 			cfg: &Finch{
-				CPUs:   pointer.Int(0),
-				Memory: pointer.String("0GiB"),
+				SystemSettings: SystemSettings{
+					CPUs:   pointer.Int(0),
+					Memory: pointer.String("0GiB"),
+				},
 			},
 			mockSvc: func(_ *mocks.Logger, _ *mocks.LoadSystemDeps, _ *mocks.Memory) {},
 			err:     errors.New("specified number of CPUs (0) must be greater than 0"),
@@ -50,8 +56,10 @@ func TestValidate(t *testing.T) {
 		{
 			name: "config specifies less memory than required",
 			cfg: &Finch{
-				CPUs:   pointer.Int(1),
-				Memory: pointer.String("0GiB"),
+				SystemSettings: SystemSettings{
+					CPUs:   pointer.Int(1),
+					Memory: pointer.String("0GiB"),
+				},
 			},
 			mockSvc: func(_ *mocks.Logger, _ *mocks.LoadSystemDeps, _ *mocks.Memory) {},
 			err:     errors.New("specified amount of memory (0GiB) must be greater than 0GiB"),
@@ -59,8 +67,10 @@ func TestValidate(t *testing.T) {
 		{
 			name: "config specifies more CPUs than available",
 			cfg: &Finch{
-				CPUs:   pointer.Int(4),
-				Memory: pointer.String("4GiB"),
+				SystemSettings: SystemSettings{
+					CPUs:   pointer.Int(4),
+					Memory: pointer.String("4GiB"),
+				},
 			},
 			mockSvc: func(l *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
 				deps.EXPECT().NumCPU().Return(1)
@@ -77,8 +87,10 @@ func TestValidate(t *testing.T) {
 		{
 			name: "config specifies more memory than available",
 			cfg: &Finch{
-				CPUs:   pointer.Int(4),
-				Memory: pointer.String("4GiB"),
+				SystemSettings: SystemSettings{
+					CPUs:   pointer.Int(4),
+					Memory: pointer.String("4GiB"),
+				},
 			},
 			mockSvc: func(l *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
 				deps.EXPECT().NumCPU().Return(8)
@@ -93,10 +105,93 @@ func TestValidate(t *testing.T) {
 			},
 			err: nil,
 		},
+		{
+			name: "happy path with bootdisk and datadisk",
+			cfg: &Finch{
+				SystemSettings: SystemSettings{
+					CPUs:     pointer.Int(4),
+					Memory:   pointer.String("4GiB"),
+					BootDisk: pointer.String("50GiB"),
+					DataDisk: pointer.String("50GiB"),
+				},
+			},
+			mockSvc: func(_ *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
+				deps.EXPECT().NumCPU().Return(8)
+				mem.EXPECT().TotalMemory().Return(uint64(12_880_000_000))
+			},
+			err: nil,
+		},
+		{
+			name: "config specifies bootdisk less than minimum",
+			cfg: &Finch{
+				SystemSettings: SystemSettings{
+					CPUs:     pointer.Int(4),
+					Memory:   pointer.String("4GiB"),
+					BootDisk: pointer.String("5GiB"),
+				},
+			},
+			mockSvc: func(_ *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
+				deps.EXPECT().NumCPU().Return(8)
+				mem.EXPECT().TotalMemory().Return(uint64(12_880_000_000))
+			},
+			err: errors.New("specified size of boot disk (5GiB) must be greater than 10GiB"),
+		},
+		{
+			name: "config specifies datadisk less than minimum",
+			cfg: &Finch{
+				SystemSettings: SystemSettings{
+					CPUs:     pointer.Int(4),
+					Memory:   pointer.String("4GiB"),
+					BootDisk: pointer.String("50GiB"),
+					DataDisk: pointer.String("5GiB"),
+				},
+			},
+			mockSvc: func(_ *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
+				deps.EXPECT().NumCPU().Return(8)
+				mem.EXPECT().TotalMemory().Return(uint64(12_880_000_000))
+			},
+			err: errors.New("specified size of datadisk (5GiB) must be greater than 10GiB"),
+		},
+		{
+			name: "config specifies invalid bootdisk format",
+			cfg: &Finch{
+				SystemSettings: SystemSettings{
+					CPUs:     pointer.Int(4),
+					Memory:   pointer.String("4GiB"),
+					BootDisk: pointer.String("50gi"),
+				},
+			},
+			mockSvc: func(_ *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
+				deps.EXPECT().NumCPU().Return(8)
+				mem.EXPECT().TotalMemory().Return(uint64(12_880_000_000))
+			},
+			err: func() error {
+				_, e := units.RAMInBytes("50gi")
+				return fmt.Errorf("failed to parse bootdisk to uint: %w", e)
+			}(),
+		},
+		{
+			name: "config specifies invalid datadisk format",
+			cfg: &Finch{
+				SystemSettings: SystemSettings{
+					CPUs:     pointer.Int(4),
+					Memory:   pointer.String("4GiB"),
+					BootDisk: pointer.String("50GiB"),
+					DataDisk: pointer.String("50gi"),
+				},
+			},
+			mockSvc: func(_ *mocks.Logger, deps *mocks.LoadSystemDeps, mem *mocks.Memory) {
+				deps.EXPECT().NumCPU().Return(8)
+				mem.EXPECT().TotalMemory().Return(uint64(12_880_000_000))
+			},
+			err: func() error {
+				_, e := units.RAMInBytes("50gi")
+				return fmt.Errorf("failed to parse datadisk to uint: %w", e)
+			}(),
+		},
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

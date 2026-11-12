@@ -1,8 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
-// +build !windows
+//go:build darwin
 
 package vmnet
 
@@ -13,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 	"gopkg.in/yaml.v3"
 
 	"github.com/runfinch/finch/pkg/mocks"
@@ -92,7 +91,6 @@ func TestDefaultLimaConfig_verifyConfigHasNetworkSection(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -131,7 +129,6 @@ func TestDefaultLimaConfig_appendNetworkConfiguration(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -179,7 +176,6 @@ func TestDefaultLimaConfig_shouldAddNetworksConfig(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -216,7 +212,6 @@ func TestDefaultLimaConfig_Installed(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -258,7 +253,6 @@ func TestDefaultLimaConfig_Install(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

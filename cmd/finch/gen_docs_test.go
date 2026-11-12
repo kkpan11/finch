@@ -13,9 +13,9 @@ import (
 
 	"github.com/runfinch/finch/pkg/mocks"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 func TestNewGenDocsCommand(t *testing.T) {
@@ -163,7 +163,6 @@ func TestGenDocsAction_runAdapter(t *testing.T) {
 
 	//nolint:paralleltest // This function manipulates stdout
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			logger := mocks.NewLogger(ctrl)

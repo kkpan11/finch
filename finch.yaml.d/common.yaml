@@ -8,13 +8,13 @@ containerd:
   user: false
   # Override containerd archive
   # 🟢 Builtin default: hard-coded URL with hard-coded digest (see the output of `limactl info | jq .defaultTemplate.containerd.archives`)
-  #   archives:
-  #   - location: "https://deps.runfinch.com/x86-64/nerdctl-full-1.7.2-1-linux-amd64.tar.gz"
-  #     arch: "x86_64"
-  #     digest: "sha256:90851068e58417551384dafb3fced8165cbfa2799b51849f85f44c0ebef2c37a"
-  #   - location: "https://deps.runfinch.com/aarch64/nerdctl-full-1.7.2-1-linux-arm64.tar.gz"
-  #     arch: "aarch64"
-  #     digest: "sha256:f354541e6234235f2ea32d6ed64e9d59a7cc4e0b7f15e63deef9cd5e90a298ef"
+  archives:
+  - location: <container_runtime_archive_aarch64_location>
+    arch: "aarch64"
+    digest: <container_runtime_archive_aarch64_digest>
+  - location: <container_runtime_archive_x86_64_location>
+    arch: "x86_64"
+    digest: <container_runtime_archive_x86_64_digest>
 
 provision:
   - mode: system
@@ -71,6 +71,10 @@ provision:
       sudo mkdir -p /mnt/lima-finch/soci-snapshotter-grpc/snapshotter/snapshots /var/lib/soci-snapshotter-grpc
       sudo mount --bind /mnt/lima-finch/soci-snapshotter-grpc /var/lib/soci-snapshotter-grpc
 
+      # Mounting buildkit dir to make the metadata persistent
+      sudo mkdir -p /mnt/lima-finch/buildkit /var/lib/buildkit
+      sudo mount --bind /mnt/lima-finch/buildkit /var/lib/buildkit
+
       # Make sure stargz and buildkit are restarted with containerd
       sudo mkdir -p /usr/local/lib/systemd/system/buildkit.service.d/
       printf '[Unit]\nPartOf=containerd.service\n' | sudo tee /usr/local/lib/systemd/system/buildkit.service.d/finch.conf
@@ -85,8 +89,10 @@ provision:
       printf '[Unit]\nDescription=Delete hanging data on boot\nDefaultDependencies=no\nBefore=basic.target\n\n[Service]\nType=oneshot\nExecStart=/bin/bash -c "sudo rm -rf /var/lib/cni/networks/bridge/**; sudo rm -rf /var/lib/cni/results/bridge-finch-*"\n\n[Install]\nWantedBy=basic.target\n' | sudo tee /usr/local/lib/systemd/system/finch-cleanup-on-boot.service
       sudo systemctl enable --now finch-cleanup-on-boot.service
 
-      sudo systemctl restart containerd.service
+      sudo systemctl daemon-reload
 
+      sudo systemctl restart containerd.service
+  
 env:
   # Containerd namespace is used by the lima cidata script
   # 40-install-containerd.sh. Specifically this variable is defining the

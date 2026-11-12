@@ -1,17 +1,23 @@
 name: Build, test and upload .msi to S3
 
-# TODO: add scheduler and tests
+# The scheduler runs at 6 AM PST (14:00 UTC) every day.
 on:
   workflow_dispatch:
+    inputs:
+      ref_name:
+        description: "name of git ref for which to build installer"
+        required: true
+        type: string
   workflow_call:
     inputs:
       ref_name:
         required: true
         type: string
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '0 14 * * *'
 env:
   GO111MODULE: on
+  GO_VERSION: '1.26.10'
 
 permissions:
   # This is required for configure-aws-credentials to request an OIDC JWT ID token to access AWS resources later on.
@@ -23,9 +29,11 @@ jobs:
   get-tag-name:
     name: Get tag name
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     outputs:
       tag: ${{ steps.check-tag.outputs.tag }}
       version: ${{ steps.check-tag.outputs.version }}
+      commit: ${{ steps.export-commit.outputs.commit }}
     steps:
       - name: Check tag from workflow input and github ref
         id: check-tag
@@ -45,44 +53,60 @@ jobs:
             version="0.0.1"
           fi
           echo "version=$version" >> ${GITHUB_OUTPUT}
-  
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.check-tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: true
+      - name: Export commit hash
+        id: export-commit
+        run: |
+          commit=$(git rev-parse HEAD)
+          echo "commit=$commit" >> ${GITHUB_OUTPUT}
+
   windows-msi-build:
     needs: get-tag-name
     runs-on: [self-hosted, windows, amd64, release]
     timeout-minutes: 100
     steps:
+      - name: Clean GitHub runner workspace
+        run: |
+          Remove-Item -Path "${{ github.workspace }}\*" -Recurse -Force -ErrorAction SilentlyContinue
       - name: Configure git CRLF settings
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
       - name: Set up Python
-        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # v5.1.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: '3.x'
+          # TODO: revert to '3.x' once PyYAML (an awscli dependency) publishes Python 3.15 Windows wheels
+          # (https://github.com/yaml/pyyaml/issues/981); until then pip tries to build it from source and fails.
+          python-version: '3.14'
       - name: Install AWS CLI
         run: |
           python -m pip install --upgrade pip
           pip install awscli
-      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          ref: ${{ needs.get-tag-name.outputs.tag }}
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.get-tag-name.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
       - name: configure aws credentials
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.WINDOWS_ROLE }}
           role-session-name: windows-msi
           aws-region: ${{ secrets.WINDOWS_REGION }}
       - name: Remove Finch VM
-        run: |
-          $ErrorActionPreference = 'Ignore'
-          taskkill /f /im wslservice.exe 2> nul || cmd /c "exit /b 0"
-          wsl --list --verbose
-          wsl --shutdown
-          wsl --unregister lima-finch
-          wsl --list --verbose
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./scripts/cleanup_wsl.ps1
       - name: Clean up previous files
         run: |
           takeown /F C:\actions-runner\_work\finch /R
@@ -92,7 +116,7 @@ jobs:
           cd deps/finch-core && make clean
       - name: Build project
         run: |
-          make FINCH_ROOTFS_LOCATION_ROOT=/__INSTALLFOLDER__
+          make FINCH_OS_IMAGE_LOCATION_ROOT=__INSTALLFOLDER__
       - name: generate and download signed msi
         run: |
           $version="${{ needs.get-tag-name.outputs.version }}"
@@ -130,7 +154,7 @@ jobs:
               throw "Failed after $maxRetries attempts."
           }
       - name: configure aws credentials for upload signed MSI to installer bucket
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ROLE }}
           role-session-name: windows-msi
@@ -141,15 +165,10 @@ jobs:
           aws s3 cp "./msi-builder/build/signed/Finch-$tag.msi" "s3://${{ secrets.INSTALLER_PRIVATE_BUCKET_NAME }}/Finch-$tag.msi" --no-progress
       - name: Remove Finch VM and Clean Up Previous Environment
         if: ${{ always() }}
+        timeout-minutes: 5
+        shell: pwsh
         run: |
-          # We want these cleanup commands to always run, ignore errors so the step completes.
-          $ErrorActionPreference = 'Ignore'
-          taskkill /f /im wslservice.exe 2> nul || cmd /c "exit /b 0"
-          wsl --list --verbose
-          wsl --shutdown
-          wsl --unregister lima-finch
-          wsl --list --verbose
-          Remove-Item C:\Users\Administrator\AppData\Local\.finch -Recurse
+          ./scripts/cleanup_wsl.ps1
           make clean
           cd deps/finch-core && make clean
           exit 0 # Cleanup may set the exit code e.g. if a file doesn't exist; just ignore
@@ -158,26 +177,33 @@ jobs:
     needs:
       - get-tag-name
       - windows-msi-build
-    strategy:
-      fail-fast: false
     runs-on: [self-hosted, windows, amd64, release]
     timeout-minutes: 180
     steps:
+      - name: Clean GitHub runner workspace
+        run: |
+          Remove-Item -Path "${{ github.workspace }}\*" -Recurse -Force -ErrorAction SilentlyContinue
       - name: Configure git CRLF settings
         run: |
           git config --global core.autocrlf false
           git config --global core.eol lf
       - name: Set up Python
-        uses: actions/setup-python@82c7e631bb3cdc910f68e0081d67478d79c6982d # v5.1.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: '3.x'
+          # TODO: revert to '3.x' once PyYAML (an awscli dependency) publishes Python 3.15 Windows wheels
+          # (https://github.com/yaml/pyyaml/issues/981); until then pip tries to build it from source and fails.
+          python-version: '3.14'
       - name: Install AWS CLI
         run: |
           python -m pip install --upgrade pip
           pip install awscli
-      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          ref: ${{ needs.get-tag-name.outputs.tag }}
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.get-tag-name.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
@@ -188,17 +214,15 @@ jobs:
           echo "has_creds=$has_creds" | Out-File -FilePath $Env:GITHUB_ENV -Encoding utf8 -Append
           exit 0 # if $has_creds is false, powershell will exit with code 1 and this step will fail
       - name: configure aws credentials
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ROLE }}
           role-session-name: msi-test
           aws-region: ${{ secrets.REGION }}
       - name: Remove Finch VM
-        run: |
-          wsl --list --verbose
-          wsl --shutdown
-          wsl --unregister lima-finch
-          wsl --list --verbose
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./scripts/cleanup_wsl.ps1
       - name: Clean up previous files
         run: |
           Remove-Item C:\Users\Administrator\.finch -Recurse -ErrorAction Ignore
@@ -221,8 +245,12 @@ jobs:
         run: |
           Start-Process 'Finch.msi' -ArgumentList '/quiet' -Wait
           echo "C:\Program Files\Finch\bin" >> $env:GITHUB_PATH
+      - name: Configure WSL networking
+        run: |
+          # set networking config option to allow for VM/container -> host communication
+          echo "networkingMode=mirrored`nhostAddressLoopback=true" > C:\Users\Administrator\.wslconfig
       - name: Run VM e2e tests
-        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
           timeout_minutes: 180
           max_attempts: 3
@@ -236,15 +264,11 @@ jobs:
             $env:INSTALLED="true"
             make test-e2e-vm
       - name: Remove Finch VM
-        run: |
-          wsl --list --verbose
-          wsl --shutdown
-          Start-Sleep -s 10
-          wsl --unregister lima-finch
-          Remove-Item C:\Users\Administrator\AppData\Local\.finch -Recurse
-          wsl --list --verbose    
+        timeout-minutes: 5
+        shell: pwsh
+        run: ./scripts/cleanup_wsl.ps1
       - name: Run container e2e tests
-        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
           timeout_minutes: 180
           max_attempts: 3
@@ -256,6 +280,7 @@ jobs:
             git status
             git clean -f -d
             $env:INSTALLED="true"
+            $env:FINCH_E2E_ALLOW_WSL_HOST_TRAFFIC="true"
             make test-e2e-container
       - name: Uninstall Finch silently
         if: ${{ always() }}
@@ -268,15 +293,10 @@ jobs:
           }
       - name: Remove Finch VM and Clean Up Previous Environment
         if: ${{ always() }}
+        timeout-minutes: 5
+        shell: pwsh
         run: |
-          # We want these cleanup commands to always run, ignore errors so the step completes.
-          $ErrorActionPreference = 'Ignore'
-          taskkill /f /im wslservice.exe 2> nul || cmd /c "exit /b 0"
-          wsl --list --verbose
-          wsl --shutdown
-          wsl --unregister lima-finch
-          wsl --list --verbose
-          Remove-Item C:\Users\Administrator\AppData\Local\.finch -Recurse
+          ./scripts/cleanup_wsl.ps1
           make clean
           cd deps/finch-core && make clean
           exit 0 # Cleanup may set the exit code e.g. if a file doesn't exist; just ignore

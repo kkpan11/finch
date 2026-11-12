@@ -17,6 +17,15 @@ import (
 	"github.com/runfinch/finch/pkg/path"
 )
 
+var (
+	// EcrVersion will be injected via Makefile.
+	EcrVersion string
+	// EcrAMD64Hash will be injected via Makefile.
+	EcrAMD64Hash string
+	// EcrARM64Hash will be injected via Makefile.
+	EcrARM64Hash string
+)
+
 const (
 	description = "Installing Credential Helper"
 	errMsg      = "Failed to finish installing credential helper"
@@ -66,11 +75,8 @@ func newDeps(
 	configs := map[string]helperConfig{}
 	installFolder := filepath.Join(finchDir, "cred-helpers")
 
-	const versionEcr = "0.8.0"
-	const hashARM64 = "sha256:d62badea3153688ec5c24f440df9fb84ff4b02c624dff9288967267e7445daa1"
-	const hashAMD64 = "sha256:dcc7ae9915b5d8fa2d9e2b18fc30bab5bfbbce5b82401c7644e6ab97973ac35c"
 	credHelperURLEcr := fmt.Sprintf("https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com"+
-		"/%s/linux-%s/docker-credential-ecr-login", versionEcr, arch)
+		"/%s/linux-%s/docker-credential-ecr-login", EcrVersion, arch)
 
 	hcEcr := helperConfig{
 		binaryName:    "docker-credential-ecr-login",
@@ -80,9 +86,9 @@ func newDeps(
 	}
 
 	if arch == "arm64" {
-		hcEcr.hash = hashARM64
+		hcEcr.hash = EcrARM64Hash
 	} else {
-		hcEcr.hash = hashAMD64
+		hcEcr.hash = EcrAMD64Hash
 	}
 
 	configs["ecr-login"] = hcEcr

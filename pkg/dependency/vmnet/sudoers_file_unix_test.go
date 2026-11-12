@@ -1,8 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
-// +build !windows
+//go:build darwin
 
 // Ensures that output of `lima sudoers` is output to the correct directory.
 // This is necessary for networking to work without prompting the user
@@ -15,21 +14,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"runtime"
 	"testing"
 
 	"github.com/runfinch/finch/pkg/mocks"
 
-	"github.com/golang/mock/gomock"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 func TestSudoers_path(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip()
-	}
 	t.Parallel()
 
 	got := newSudoersFile(nil, nil, nil, nil).path()
@@ -37,19 +32,16 @@ func TestSudoers_path(t *testing.T) {
 }
 
 func TestSudoers_Installed(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip()
-	}
 	t.Parallel()
 
 	testCases := []struct {
 		name    string
-		mockSvc func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.LimaCmdCreator, l *mocks.Logger)
+		mockSvc func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.NerdctlCmdCreator, l *mocks.Logger)
 		want    bool
 	}{
 		{
 			name: "happy path",
-			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.LimaCmdCreator, _ *mocks.Logger) {
+			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.NerdctlCmdCreator, _ *mocks.Logger) {
 				sudoersData := []byte("test data")
 
 				err := afero.WriteFile(mFs, "/etc/sudoers.d/finch-lima", sudoersData, 0o666)
@@ -62,7 +54,7 @@ func TestSudoers_Installed(t *testing.T) {
 		},
 		{
 			name: "sudoers path doesn't exist",
-			mockSvc: func(_ *testing.T, _ *mocks.Command, _ afero.Fs, _ *mocks.LimaCmdCreator, l *mocks.Logger) {
+			mockSvc: func(_ *testing.T, _ *mocks.Command, _ afero.Fs, _ *mocks.NerdctlCmdCreator, l *mocks.Logger) {
 				var pathErr fs.PathError
 				pathErr.Op = "open"
 				pathErr.Path = "/etc/sudoers.d/finch-lima"
@@ -74,7 +66,7 @@ func TestSudoers_Installed(t *testing.T) {
 		},
 		{
 			name: "sudoers command throws an error",
-			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.LimaCmdCreator, l *mocks.Logger) {
+			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.NerdctlCmdCreator, l *mocks.Logger) {
 				sudoersData := []byte("test data")
 				wantErr := errors.New("some error")
 
@@ -89,7 +81,7 @@ func TestSudoers_Installed(t *testing.T) {
 		},
 		{
 			name: "paths exist, but contents don't match",
-			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.LimaCmdCreator, _ *mocks.Logger) {
+			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, lc *mocks.NerdctlCmdCreator, _ *mocks.Logger) {
 				sudoersData1 := []byte("test data")
 				sudoersData2 := []byte("different test data")
 
@@ -104,7 +96,6 @@ func TestSudoers_Installed(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -112,7 +103,7 @@ func TestSudoers_Installed(t *testing.T) {
 			cmd := mocks.NewCommand(ctrl)
 			l := mocks.NewLogger(ctrl)
 			mFs := afero.NewMemMapFs()
-			mLimaCreator := mocks.NewLimaCmdCreator(ctrl)
+			mLimaCreator := mocks.NewNerdctlCmdCreator(ctrl)
 			tc.mockSvc(t, cmd, mFs, mLimaCreator, l)
 
 			got := newSudoersFile(mFs, nil, mLimaCreator, l).Installed()
@@ -122,19 +113,16 @@ func TestSudoers_Installed(t *testing.T) {
 }
 
 func TestSudoers_Install(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip()
-	}
 	t.Parallel()
 
 	testCases := []struct {
 		name    string
-		mockSvc func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.LimaCmdCreator)
+		mockSvc func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.NerdctlCmdCreator)
 		want    error
 	}{
 		{
 			name: "happy path",
-			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.LimaCmdCreator) {
+			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.NerdctlCmdCreator) {
 				sudoersData := []byte("test data")
 				mockSudoersOut := []byte("mock_sudoers_out")
 
@@ -153,7 +141,7 @@ func TestSudoers_Install(t *testing.T) {
 		},
 		{
 			name: "lima sudoers command throws err",
-			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, _ *mocks.CommandCreator, lc *mocks.LimaCmdCreator) {
+			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, _ *mocks.CommandCreator, lc *mocks.NerdctlCmdCreator) {
 				sudoersData := []byte("test data")
 
 				err := afero.WriteFile(mFs, "/etc/sudoers.d/finch-lima", sudoersData, 0o666)
@@ -166,7 +154,7 @@ func TestSudoers_Install(t *testing.T) {
 		},
 		{
 			name: "sudo tee command throws err",
-			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.LimaCmdCreator) {
+			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.NerdctlCmdCreator) {
 				sudoersData := []byte("test data")
 				mockSudoersOut := []byte("mock_sudoers_out")
 
@@ -183,7 +171,7 @@ func TestSudoers_Install(t *testing.T) {
 		},
 		{
 			name: "sudo chmod command throws err",
-			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.LimaCmdCreator) {
+			mockSvc: func(t *testing.T, cmd *mocks.Command, mFs afero.Fs, ec *mocks.CommandCreator, lc *mocks.NerdctlCmdCreator) {
 				sudoersData := []byte("test data")
 				mockSudoersOut := []byte("mock_sudoers_out")
 
@@ -203,7 +191,6 @@ func TestSudoers_Install(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -211,7 +198,7 @@ func TestSudoers_Install(t *testing.T) {
 			cmd := mocks.NewCommand(ctrl)
 			mFs := afero.NewMemMapFs()
 			mExecCreator := mocks.NewCommandCreator(ctrl)
-			mLimaCreator := mocks.NewLimaCmdCreator(ctrl)
+			mLimaCreator := mocks.NewNerdctlCmdCreator(ctrl)
 			tc.mockSvc(t, cmd, mFs, mExecCreator, mLimaCreator)
 
 			got := newSudoersFile(mFs, mExecCreator, mLimaCreator, nil).Install()
@@ -221,9 +208,6 @@ func TestSudoers_Install(t *testing.T) {
 }
 
 func TestSudoers_RequiresRoot(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip()
-	}
 	t.Parallel()
 
 	got := newSudoersFile(nil, nil, nil, nil).RequiresRoot()

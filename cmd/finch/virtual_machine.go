@@ -1,20 +1,24 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build darwin || windows
+
 package main
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/runfinch/finch/pkg/dependency"
 	"github.com/runfinch/finch/pkg/disk"
 	"github.com/runfinch/finch/pkg/fssh"
 	"github.com/runfinch/finch/pkg/system"
 
 	"github.com/runfinch/finch/pkg/command"
 	"github.com/runfinch/finch/pkg/config"
-	"github.com/runfinch/finch/pkg/dependency"
+	credserver "github.com/runfinch/finch/pkg/credserver"
 	"github.com/runfinch/finch/pkg/flog"
 	"github.com/runfinch/finch/pkg/path"
 
@@ -27,37 +31,9 @@ const (
 	virtualMachineRootCmd = "vm"
 )
 
-func newVirtualMachineCommand(
-	limaCmdCreator command.LimaCmdCreator,
-	logger flog.Logger,
-	optionalDepGroups []*dependency.Group,
-	lca config.LimaConfigApplier,
-	nca config.NerdctlConfigApplier,
-	fp path.Finch,
-	fs afero.Fs,
-	diskManager disk.UserDataDiskManager,
-) *cobra.Command {
-	virtualMachineCommand := &cobra.Command{
-		Use:   virtualMachineRootCmd,
-		Short: "Manage the virtual machine lifecycle",
-	}
-
-	virtualMachineCommand.AddCommand(
-		newStartVMCommand(limaCmdCreator, logger, optionalDepGroups, lca, nca, fs, fp.LimaSSHPrivateKeyPath(), diskManager),
-		newStopVMCommand(limaCmdCreator, diskManager, logger),
-		newRemoveVMCommand(limaCmdCreator, diskManager, logger),
-		newStatusVMCommand(limaCmdCreator, logger, os.Stdout),
-		newInitVMCommand(limaCmdCreator, logger, optionalDepGroups, lca, nca, fp.BaseYamlFilePath(), fs,
-			fp.LimaSSHPrivateKeyPath(), diskManager),
-		newSettingsVMCommand(logger, lca, fs, os.Stdout),
-	)
-
-	return virtualMachineCommand
-}
-
 // Used by the actions that call VM start to ensure that the in-VM config file options are applied after boot.
 type postVMStartInitAction struct {
-	creator        command.LimaCmdCreator
+	creator        command.NerdctlCmdCreator
 	logger         flog.Logger
 	fs             afero.Fs
 	privateKeyPath string
@@ -66,7 +42,7 @@ type postVMStartInitAction struct {
 
 func newPostVMStartInitAction(
 	logger flog.Logger,
-	creator command.LimaCmdCreator,
+	creator command.NerdctlCmdCreator,
 	fs afero.Fs,
 	privateKeyPath string,
 	nca config.NerdctlConfigApplier,
@@ -93,24 +69,52 @@ func (p *postVMStartInitAction) run() error {
 		p.logger.Warnln("SSH port = 0, is the instance running? Not able to apply VM configuration options")
 		return nil
 	}
+
+	// Start credential server after VM is running (macOS only)
+	// macOS: Credential server runs on host and communicates with VM via Unix socket using finchhost credential helper
+	// Windows: No credential server needed - WSL can access credentials and credhelpers via mounted ~/.finch/config.json
+	execPath, err := os.Executable()
+	if err == nil {
+		// Resolve symlink to get actual installation path
+		realPath, err := filepath.EvalSymlinks(execPath)
+		if err != nil {
+			realPath = execPath
+		}
+		finchRootPath := filepath.Dir(filepath.Dir(realPath))
+
+		// Check if daemon is already running before attempting to start
+		if !credserver.IsDaemonRunning(finchRootPath) {
+			if err := credserver.StartCredentialServer(finchRootPath); err != nil {
+				p.logger.Warnf("Failed to start credential server: %v", err)
+			}
+		}
+	}
+
 	return p.nca.Apply(fmt.Sprintf("127.0.0.1:%v", portString))
 }
 
-func virtualMachineCommands(
+// vmDependencies holds the shared dependencies needed for VM init/start operations.
+type vmDependencies struct {
+	optionalDepGroups []*dependency.Group
+	lca               config.LimaConfigApplier
+	nca               config.NerdctlConfigApplier
+	diskManager       disk.UserDataDiskManager
+}
+
+func buildVMDependencies(
 	logger flog.Logger,
 	fp path.Finch,
-	lcc command.LimaCmdCreator,
+	ncc command.NerdctlCmdCreator,
 	ecc command.Creator,
 	fs afero.Fs,
 	fc *config.Finch,
 	home string,
 	finchRootPath string,
-) *cobra.Command {
-	return newVirtualMachineCommand(
-		lcc,
-		logger,
-		dependencies(ecc, fc, fp, fs, lcc, logger, fp.FinchDir(finchRootPath)),
-		config.NewLimaApplier(
+) *vmDependencies {
+	finchDir := fp.FinchDir(finchRootPath)
+	return &vmDependencies{
+		optionalDepGroups: dependencies(ecc, fc, fp, fs, ncc, logger, finchDir),
+		lca: config.NewLimaApplier(
 			fc,
 			ecc,
 			fs,
@@ -119,17 +123,39 @@ func virtualMachineCommands(
 			system.NewStdLib(),
 			fp.ConfigFilePath(finchRootPath),
 		),
-		config.NewNerdctlApplier(
+		nca: config.NewNerdctlApplier(
 			fssh.NewDialer(),
 			fs,
 			fp.LimaSSHPrivateKeyPath(),
-			fp.FinchDir(finchRootPath),
+			finchDir,
 			home,
 			fp.LimaInstancePath(),
 			fc,
 		),
+		diskManager: disk.NewUserDataDiskManager(ncc, ecc, &afero.OsFs{}, fp, finchRootPath, fc, logger),
+	}
+}
+
+func virtualMachineCommands(
+	logger flog.Logger,
+	fp path.Finch,
+	ncc command.NerdctlCmdCreator,
+	ecc command.Creator,
+	fs afero.Fs,
+	fc *config.Finch,
+	home string,
+	finchRootPath string,
+) *cobra.Command {
+	deps := buildVMDependencies(logger, fp, ncc, ecc, fs, fc, home, finchRootPath)
+	return newVirtualMachineCommand(
+		ncc,
+		logger,
+		deps.optionalDepGroups,
+		deps.lca,
+		deps.nca,
 		fp,
 		fs,
-		disk.NewUserDataDiskManager(lcc, ecc, &afero.OsFs{}, fp, finchRootPath, fc, logger),
+		deps.diskManager,
+		fc,
 	)
 }

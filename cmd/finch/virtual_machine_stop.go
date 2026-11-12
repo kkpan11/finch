@@ -1,12 +1,17 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build darwin || windows
+
 package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/runfinch/finch/pkg/command"
+	credserver "github.com/runfinch/finch/pkg/credserver"
 	"github.com/runfinch/finch/pkg/disk"
 	"github.com/runfinch/finch/pkg/flog"
 	"github.com/runfinch/finch/pkg/lima"
@@ -14,7 +19,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newStopVMCommand(limaCmdCreator command.LimaCmdCreator, diskManager disk.UserDataDiskManager, logger flog.Logger) *cobra.Command {
+func newStopVMCommand(limaCmdCreator command.NerdctlCmdCreator, diskManager disk.UserDataDiskManager, logger flog.Logger) *cobra.Command {
 	stopVMCommand := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the virtual machine",
@@ -27,12 +32,12 @@ func newStopVMCommand(limaCmdCreator command.LimaCmdCreator, diskManager disk.Us
 }
 
 type stopVMAction struct {
-	creator     command.LimaCmdCreator
+	creator     command.NerdctlCmdCreator
 	diskManager disk.UserDataDiskManager
 	logger      flog.Logger
 }
 
-func newStopVMAction(creator command.LimaCmdCreator, diskManager disk.UserDataDiskManager, logger flog.Logger) *stopVMAction {
+func newStopVMAction(creator command.NerdctlCmdCreator, diskManager disk.UserDataDiskManager, logger flog.Logger) *stopVMAction {
 	return &stopVMAction{creator: creator, diskManager: diskManager, logger: logger}
 }
 
@@ -57,7 +62,7 @@ func (sva *stopVMAction) run(force bool) error {
 	return sva.stopVM(false)
 }
 
-func (sva *stopVMAction) assertVMIsRunning(creator command.LimaCmdCreator, logger flog.Logger) error {
+func (sva *stopVMAction) assertVMIsRunning(creator command.NerdctlCmdCreator, logger flog.Logger) error {
 	status, err := lima.GetVMStatus(creator, logger, limaInstanceName)
 	if err != nil {
 		return err
@@ -73,6 +78,22 @@ func (sva *stopVMAction) assertVMIsRunning(creator command.LimaCmdCreator, logge
 }
 
 func (sva *stopVMAction) stopVM(force bool) error {
+	// Stop credential server before VM stops (macOS only)
+	// macOS: Credential server runs on host and communicates with VM via Unix socket using finchhost credential helper
+	// Windows: No credential server needed - WSL can access credentials and credhelpers via mounted ~/.finch/config.json
+	execPath, err := os.Executable()
+	if err == nil {
+		// Resolve symlink to get actual installation path
+		realPath, err := filepath.EvalSymlinks(execPath)
+		if err != nil {
+			realPath = execPath
+		}
+		finchRootPath := filepath.Dir(filepath.Dir(realPath))
+		if err := credserver.StopCredentialServer(finchRootPath); err != nil {
+			sva.logger.Warnf("Failed to stop credential server: %v", err)
+		}
+	}
+
 	limaCmd := sva.createLimaStopCommand(force)
 	if force {
 		sva.logger.Info("Forcibly stopping Finch virtual machine...")

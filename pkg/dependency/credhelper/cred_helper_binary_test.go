@@ -12,10 +12,10 @@ import (
 	"github.com/runfinch/finch/pkg/mocks"
 	"github.com/runfinch/finch/pkg/path"
 
-	"github.com/golang/mock/gomock"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 const (
@@ -113,7 +113,6 @@ func Test_updateConfigFile(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -202,7 +201,6 @@ func TestBinaries_Installed(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -249,7 +247,7 @@ func TestBinaries_Install(t *testing.T) {
 				l.EXPECT().Infof("Installing %s credential helper", "ecr")
 				creator.EXPECT().Create("curl", "--retry", "5", "--retry-max-time", "30", "--url",
 					"https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com"+
-						"/0.7.0/linux-arm64/docker-credential-ecr-login", "--output",
+						"/0.9.0/linux-arm64/docker-credential-ecr-login", "--output",
 					filepath.Join("mock_prefix", "cred-helpers", "docker-credential-ecr-login")).Return(cmd)
 			},
 			want: nil,
@@ -276,7 +274,6 @@ func TestBinaries_Install(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			cmd := mocks.NewCommand(ctrl)
@@ -287,11 +284,11 @@ func TestBinaries_Install(t *testing.T) {
 			tc.mockSvc(l, cmd, creator, mFs)
 
 			credHelperURL := "https://amazon-ecr-credential-helper-releases.s3.us-east-2.amazonaws.com" +
-				"/0.7.0/linux-arm64/docker-credential-ecr-login"
+				"/0.9.0/linux-arm64/docker-credential-ecr-login"
 
 			hc := helperConfig{
 				"docker-credential-ecr-login", credHelperURL,
-				"sha256:ec5c04babea79b08dffb0c8acb67b9e28dc05be0fe9bd4df2e234d75516061d7",
+				"sha256:76aa3bb223d4e64dd4456376334273f27830c8d818efe278ab6ea81cb0844420",
 				"mock_prefix/cred-helpers/",
 				"mock_prefix/.finch/",
 			}

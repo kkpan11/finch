@@ -23,11 +23,11 @@ func dependencies(
 	fc *config.Finch,
 	fp path.Finch,
 	fs afero.Fs,
-	lcc command.LimaCmdCreator,
+	ncc command.NerdctlCmdCreator,
 	logger flog.Logger,
 	finchRootPath string,
 ) []*dependency.Group {
-	return []*dependency.Group{
+	groups := []*dependency.Group{
 		credhelper.NewDependencyGroup(
 			ecc,
 			fs,
@@ -37,6 +37,13 @@ func dependencies(
 			finchRootPath,
 			system.NewStdLib().Arch(),
 		),
-		vmnet.NewDependencyGroup(ecc, lcc, fs, fp, logger),
 	}
+
+	if fc.VMNet != nil && *fc.VMNet {
+		if fc.VMType != nil && *fc.VMType == "qemu" {
+			groups = append(groups, vmnet.NewDependencyGroup(ecc, ncc, fs, fp, logger))
+		}
+	}
+
+	return groups
 }

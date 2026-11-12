@@ -6,6 +6,7 @@ package lima
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/runfinch/finch/pkg/command"
@@ -22,6 +23,9 @@ type VMStatus int64
 // https://github.com/lima-vm/lima/blob/f0282b2dfc4b6795295fceb2c86acd1312cef436/pkg/limayaml/limayaml.go#L53-L54.
 type VMType string
 
+// LimaVersion is injected at build time to be used in the call to osutil.LimaUser.
+var LimaVersion string
+
 // Finch CLI assumes there are only 4 VM status below. Adding more statuses will need to make changes in the caller side.
 const (
 	Running VMStatus = iota
@@ -36,11 +40,15 @@ const (
 )
 
 // GetVMStatus returns the Lima VM status.
-func GetVMStatus(creator command.LimaCmdCreator, logger flog.Logger, instanceName string) (VMStatus, error) {
+func GetVMStatus(creator command.NerdctlCmdCreator, logger flog.Logger, instanceName string) (VMStatus, error) {
 	args := []string{"ls", "-f", "{{.Status}}", instanceName}
 	cmd := creator.CreateWithoutStdio(args...)
 	out, err := cmd.Output()
 	if err != nil {
+		if strings.TrimSpace(string(out)) == "" ||
+			strings.Contains(strings.TrimSpace(string(out)), fmt.Sprintf("No instance matching %s found", instanceName)) {
+			return Nonexistent, nil
+		}
 		return Unknown, err
 	}
 	status := strings.TrimSpace(string(out))
@@ -48,7 +56,7 @@ func GetVMStatus(creator command.LimaCmdCreator, logger flog.Logger, instanceNam
 }
 
 // GetVMType returns the Lima VMType for a running instance.
-func GetVMType(creator command.LimaCmdCreator, logger flog.Logger, instanceName string) (VMType, error) {
+func GetVMType(creator command.NerdctlCmdCreator, logger flog.Logger, instanceName string) (VMType, error) {
 	args := []string{"ls", "-f", "{{.VMType}}", instanceName}
 	cmd := creator.CreateWithoutStdio(args...)
 	out, err := cmd.Output()

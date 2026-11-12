@@ -1,4 +1,6 @@
 #!/bin/bash
+set -o errexit
+set -o pipefail
 
 ARCH=${1}
 VERSION=${2}
@@ -44,7 +46,7 @@ buildPkgInstaller() {
     mkdir -p $INSTALLER_FULL_PATH/unsigned/package/artifact
 
     #build pkg
-    # this identifier doens't match what's in the Info.plist for Finch, but changing it now
+    # this identifier doesn't match what's in the Info.plist for Finch, but changing it now
     # would break upgrades
     pkgbuild --identifier org.Finch."${VERSION}" \
     --version "$VERSION" \

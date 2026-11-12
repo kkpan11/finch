@@ -14,6 +14,7 @@ jobs:
   get-tag-name:
     name: Get tag name
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     outputs:
       tag: ${{ steps.check-tag.outputs.tag }}
     steps:
@@ -30,9 +31,10 @@ jobs:
   upload-installers:
     needs: get-tag-name
     runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - name: configure aws credentials
-        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.ROLE }}
           role-session-name: download-installer-session
@@ -43,7 +45,7 @@ jobs:
           aws s3 cp s3://${{ secrets.INSTALLER_PRIVATE_BUCKET_NAME }}/Finch-${{ needs.get-tag-name.outputs.tag }}-x86_64.pkg Finch-${{ needs.get-tag-name.outputs.tag }}-x86_64.pkg
           aws s3 cp s3://${{ secrets.DEPENDENCY_BUCKET_NAME }}/dependency-sources.tar.gz DependenciesSourceCode.tar.gz
       - name: Upload installers and dependency source code to release
-        uses: softprops/action-gh-release@a74c6b72af54cfa997e81df42d94703d6313a2d0 # v0.1.15
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v0.1.15
         with:
           tag_name: ${{ needs.get-tag-name.outputs.tag }}
           files: |

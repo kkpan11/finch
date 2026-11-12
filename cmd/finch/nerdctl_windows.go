@@ -12,8 +12,62 @@ import (
 	dockerops "github.com/docker/docker/opts"
 
 	"github.com/runfinch/finch/pkg/command"
+	"github.com/runfinch/finch/pkg/config"
 	"github.com/runfinch/finch/pkg/flog"
 )
+
+var osAliasMap = map[string]string{
+	"save": "image save",
+	"load": "image load",
+}
+
+var osCommandHandlerMap = map[string]commandHandler{
+	"container cp": cpHandler,
+	"image build":  imageBuildHandler,
+}
+
+var osArgHandlerMap = map[string]map[string]argHandler{
+	"image build": {
+		"-f":        handleFilePath,
+		"--file":    handleFilePath,
+		"--iidfile": handleFilePath,
+		"-o":        handleOutputOption,
+		"--output":  handleOutputOption,
+		"--secret":  handleSecretOption,
+	},
+	"image save": {
+		"-o":       handleFilePath,
+		"--output": handleFilePath,
+	},
+	"image load": {
+		"-i":      handleFilePath,
+		"--input": handleFilePath,
+	},
+	"container run": {
+		"--label-file": handleFilePath,
+		"--cosign-key": handleFilePath,
+		"--cidfile":    handleFilePath,
+		"-v":           handleVolume,
+		"--volume":     handleVolume,
+	},
+	"compose": {
+		"--file": handleFilePath,
+	},
+}
+
+func (nc *nerdctlCommand) GetCmdArgs() []string {
+	wd, err := nc.systemDeps.GetWd()
+	if err != nil {
+		nc.logger.Warnf("failed to get working directory, will default to user home with error %s", err.Error())
+		return []string{"shell", limaInstanceName, "sudo", "-E"}
+	}
+	wslPath, err := convertToWSLPath(nc.systemDeps, wd)
+	if err != nil {
+		nc.logger.Warnf("failed to convert to WSL path, will default to user home with error %s", err.Error())
+		return []string{"shell", limaInstanceName, "sudo", "-E"}
+	}
+	return []string{"shell", "--workdir", wslPath, limaInstanceName, "sudo", "-E"}
+}
 
 func convertToWSLPath(systemDeps NerdctlCommandSystemDeps, winPath string) (string, error) {
 	path, err := systemDeps.FilePathAbs(filepath.Clean(winPath))
@@ -32,7 +86,7 @@ func convertToWSLPath(systemDeps NerdctlCommandSystemDeps, winPath string) (stri
 }
 
 // substitutes wsl path for the provided option in place for nerdctl args.
-func handleFilePath(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string, index int) error {
+func handleFilePath(systemDeps NerdctlCommandSystemDeps, _ *config.Finch, nerdctlCmdArgs []string, index int) error {
 	prefix := nerdctlCmdArgs[index]
 
 	// If --filename="<filepath> then we need to cut <filepath> and convert that to wsl path
@@ -57,8 +111,8 @@ func handleFilePath(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string
 	return nil
 }
 
-// hanldes -v/--volumes option. For anonymous volumes and named volumes this is no-op. For bind mounts path is converted to wsl path.
-func handleVolume(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string, index int) error {
+// handles -v/--volumes option. For anonymous volumes and named volumes this is no-op. For bind mounts path is converted to wsl path.
+func handleVolume(systemDeps NerdctlCommandSystemDeps, _ *config.Finch, nerdctlCmdArgs []string, index int) error {
 	prefix := nerdctlCmdArgs[index]
 	var (
 		v      string
@@ -114,76 +168,8 @@ func handleVolume(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string, 
 	return nil
 }
 
-// translates source path of the bind mount to wslpath for --mount option.
-func handleBindMounts(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string, index int) error {
-	prefix := nerdctlCmdArgs[index]
-	var (
-		v      string
-		found  bool
-		before string
-	)
-	if strings.Contains(nerdctlCmdArgs[index], "=") {
-		before, v, found = strings.Cut(prefix, "=")
-	} else {
-		if (index + 1) < len(nerdctlCmdArgs) {
-			v = nerdctlCmdArgs[index+1]
-		} else {
-			return fmt.Errorf("invalid positional parameter for %s", prefix)
-		}
-	}
-
-	// https://docs.docker.com/storage/bind-mounts/#choose-the--v-or---mount-flag  order does not matter, so convert to a map
-	entries := strings.Split(v, ",")
-	m := make(map[string]string)
-	ro := []string{}
-	for _, e := range entries {
-		parts := strings.Split(e, "=")
-		// eg --mount type=bind,source="$(pwd)"/target,target=/app,readonly
-		if len(parts) < 2 {
-			ro = append(ro, parts...)
-		} else {
-			m[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-		}
-	}
-	// Check if type is bind mount, else return
-	if m["type"] != "bind" {
-		return nil
-	}
-	var k string
-	path, ok := m["src"]
-	if !ok {
-		path, ok = m["source"]
-		k = "source"
-	} else {
-		k = "src"
-	}
-	// If there is no src or source or not a windows path, do nothing, let nerdctl handle error
-	if !ok || !strings.Contains(path, `\`) {
-		return nil
-	}
-	wslPath, err := convertToWSLPath(systemDeps, path)
-	if err != nil {
-		return err
-	}
-	m[k] = wslPath
-
-	// Convert to string representation
-	s := mapToString(m)
-	// append read-only key if present
-	if len(ro) > 0 {
-		s = s + "," + strings.Join(ro, ",")
-	}
-	if found {
-		nerdctlCmdArgs[index] = fmt.Sprintf("%s=%s", before, s)
-	} else {
-		nerdctlCmdArgs[index+1] = s
-	}
-
-	return nil
-}
-
 // handles --output/-o for build command.
-func handleOutputOption(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string, index int) error {
+func handleOutputOption(systemDeps NerdctlCommandSystemDeps, _ *config.Finch, nerdctlCmdArgs []string, index int) error {
 	prefix := nerdctlCmdArgs[index]
 	var (
 		v      string
@@ -230,7 +216,7 @@ func handleOutputOption(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []st
 }
 
 // handles --secret option for build command.
-func handleSecretOption(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string, index int) error {
+func handleSecretOption(systemDeps NerdctlCommandSystemDeps, _ *config.Finch, nerdctlCmdArgs []string, index int) error {
 	prefix := nerdctlCmdArgs[index]
 	var (
 		v      string
@@ -276,8 +262,8 @@ func handleSecretOption(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []st
 }
 
 // cp command handler, takes command arguments and converts hostpath to wsl path in place. It ignores all other arguments.
-func cpHandler(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string) error {
-	for i, arg := range nerdctlCmdArgs {
+func cpHandler(systemDeps NerdctlCommandSystemDeps, _ *config.Finch, _ *string, nerdctlCmdArgs *[]string, _ *string) error {
+	for i, arg := range *nerdctlCmdArgs {
 		// -L and --follow-symlink don't have to be processed
 		if strings.HasPrefix(arg, "-") || arg == "cp" {
 			continue
@@ -293,28 +279,28 @@ func cpHandler(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string) err
 		if err != nil {
 			return err
 		}
-		nerdctlCmdArgs[i] = wslPath
+		(*nerdctlCmdArgs)[i] = wslPath
 	}
 	return nil
 }
 
 // this is the handler for image build command. It translates build context to wsl path.
-func imageBuildHandler(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []string) error {
+func imageBuildHandler(systemDeps NerdctlCommandSystemDeps, _ *config.Finch, _ *string, nerdctlCmdArgs *[]string, _ *string) error {
 	var err error
-	argLen := len(nerdctlCmdArgs) - 1
+	argLen := len(*nerdctlCmdArgs) - 1
 	// -h/--help don't have buildcontext, just return
-	for _, a := range nerdctlCmdArgs {
+	for _, a := range *nerdctlCmdArgs {
 		if a == "--help" || a == "-h" {
 			return nil
 		}
 	}
-	if nerdctlCmdArgs[argLen] != "--debug" {
-		nerdctlCmdArgs[argLen], err = convertToWSLPath(systemDeps, nerdctlCmdArgs[argLen])
+	if (*nerdctlCmdArgs)[argLen] != "--debug" {
+		(*nerdctlCmdArgs)[argLen], err = convertToWSLPath(systemDeps, (*nerdctlCmdArgs)[argLen])
 		if err != nil {
 			return err
 		}
 	} else {
-		nerdctlCmdArgs[argLen-1], err = convertToWSLPath(systemDeps, nerdctlCmdArgs[argLen-1])
+		(*nerdctlCmdArgs)[argLen-1], err = convertToWSLPath(systemDeps, (*nerdctlCmdArgs)[argLen-1])
 		if err != nil {
 			return err
 		}
@@ -322,47 +308,27 @@ func imageBuildHandler(systemDeps NerdctlCommandSystemDeps, nerdctlCmdArgs []str
 	return nil
 }
 
-var aliasMap = map[string]string{
-	"build": "image build",
-	"save":  "image save",
-	"load":  "image load",
-	"cp":    "container cp",
-	"run":   "container run",
-}
+func handleBindMountPath(systemDeps NerdctlCommandSystemDeps, m map[string]string) error {
+	// Handle src/source path
+	var k string
+	path, ok := m["src"]
+	if !ok {
+		path, ok = m["source"]
+		k = "source"
+	} else {
+		k = "src"
+	}
+	// If there is no src or source or not a windows path, do nothing, let nerdctl handle error
+	if !ok || !strings.Contains(path, `\`) {
+		return nil
+	}
+	wslPath, err := convertToWSLPath(systemDeps, path)
+	if err != nil {
+		return err
+	}
 
-var argHandlerMap = map[string]map[string]argHandler{
-	"image build": {
-		"-f":        handleFilePath,
-		"--file":    handleFilePath,
-		"--iidfile": handleFilePath,
-		"-o":        handleOutputOption,
-		"--output":  handleOutputOption,
-		"--secret":  handleSecretOption,
-	},
-	"image save": {
-		"-o":       handleFilePath,
-		"--output": handleFilePath,
-	},
-	"image load": {
-		"-i":      handleFilePath,
-		"--input": handleFilePath,
-	},
-	"container run": {
-		"--label-file": handleFilePath,
-		"--cosign-key": handleFilePath,
-		"--cidfile":    handleFilePath,
-		"-v":           handleVolume,
-		"--volume":     handleVolume,
-		"--mount":      handleBindMounts,
-	},
-	"compose": {
-		"--file": handleFilePath,
-	},
-}
-
-var commandHandlerMap = map[string]commandHandler{
-	"container cp": cpHandler,
-	"image build":  imageBuildHandler,
+	m[k] = wslPath
+	return nil
 }
 
 func mapToString(m map[string]string) string {
@@ -380,13 +346,34 @@ func resolveIP(host string, logger flog.Logger, ecc command.Creator) (string, er
 	// access host from the containers.
 	var resolvedIP string
 	if parts[1] == dockerops.HostGatewayName {
-		// get ip address for adapter vEthernet (WSL) to reach host from wsl
+		// Resolve the IPv4 address of the WSL host adapter so containers can reach the host.
 		// https://learn.microsoft.com/en-us/windows/wsl/networking#accessing-windows-networking-apps-from-linux-host-ip
-		out, err := ecc.Create("cmd", "/C", "netsh", "interface", "ipv4", "show", "addresses", "vEthernet (WSL)").Output()
-		if err != nil {
-			return "", err
+		//
+		// The adapter name differs by Windows version:
+		//   - Windows Server 2022 / older WSL:              "vEthernet (WSL)"
+		//   - Windows Server 2025 / Win11 22H2+ (mirrored): "vEthernet (WSL (Hyper-V firewall))"
+		// Try each and use the first that yields an address so this works on both. netsh.exe is
+		// invoked directly (not via "cmd /C"): routing the quoted, parenthesized interface name
+		// through cmd mangles the argument and makes netsh exit 1.
+		wslAdapterNames := []string{"vEthernet (WSL)", "vEthernet (WSL (Hyper-V firewall))"}
+		var lastOutput string
+		for _, adapter := range wslAdapterNames {
+			out, cmdErr := ecc.Create("netsh", "interface", "ipv4", "show", "addresses", adapter).CombinedOutput()
+			lastOutput = string(out)
+			if cmdErr != nil {
+				continue
+			}
+			if ip := extractIPAddress(string(out)); ip != "" {
+				resolvedIP = ip
+				break
+			}
 		}
-		resolvedIP = extractIPAddress(string(out))
+		if resolvedIP == "" {
+			return "", fmt.Errorf(
+				"could not resolve host-gateway IP from WSL adapter (tried %v); netsh output: %s",
+				wslAdapterNames, lastOutput,
+			)
+		}
 
 		logger.Debugf(`Resolving special IP "host-gateway" to %q for host %q`, resolvedIP, parts[0])
 		return fmt.Sprintf("%s:%s", parts[0], resolvedIP), nil

@@ -20,6 +20,7 @@ sudo pkill '^qemu-system-'
 sudo pkill '^limactl'
 
 if [ "$$(readlink "/usr/local/bin/finch")" = "/Applications/Finch/bin/finch" ]; then sudo rm /usr/local/bin/finch; fi
+if [ "$$(readlink "/usr/local/bin/docker-credential-osxkeychain")" = "/Applications/Finch/cred-helpers/docker-credential-osxkeychain" ]; then sudo rm /usr/local/bin/docker-credential-osxkeychain; fi
 
 echo "[1/4] [DONE] Successfully deleted shortcut links"
 
@@ -32,9 +33,9 @@ done
 
 if [ $? -eq 0 ]
 then
-  echo "[2/4] [DONE] Successfully deleted application informations"
+  echo "[2/4] [DONE] Successfully deleted application information"
 else
-  echo "[2/4] [ERROR] Could not delete application informations" >&2
+  echo "[2/4] [ERROR] Could not delete application information" >&2
 fi
 
 #remove application source distribution

@@ -11,11 +11,12 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/golang/mock/gomock"
-	"github.com/lima-vm/lima/pkg/limayaml"
+	"github.com/lima-vm/lima/v2/pkg/limatype"
+	"github.com/lima-vm/lima/v2/pkg/limayaml"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/require"
 	"github.com/xorcare/pointer"
+	"go.uber.org/mock/gomock"
 	"gopkg.in/yaml.v3"
 
 	"github.com/runfinch/finch/pkg/mocks"
@@ -43,13 +44,8 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 		want         error
 	}{
 		{
-			name: "happy path",
-			config: &Finch{
-				Memory:  pointer.String("2GiB"),
-				CPUs:    pointer.Int(4),
-				VMType:  pointer.String("qemu"),
-				Rosetta: pointer.Bool(false),
-			},
+			name:         "happy path",
+			config:       makeConfig("qemu", "2GiB", 4, false),
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
 			isInit:       true,
@@ -67,7 +63,7 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -79,18 +75,24 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
 			name: "adds soci script and sets soci as default snapshotter when soci is first in snapshotters array",
 			config: &Finch{
-				Memory:       pointer.String("2GiB"),
-				CPUs:         pointer.Int(4),
-				VMType:       pointer.String("qemu"),
-				Rosetta:      pointer.Bool(false),
-				Snapshotters: []string{"soci"},
+				SystemSettings: SystemSettings{
+					Memory:  pointer.String("2GiB"),
+					CPUs:    pointer.Int(4),
+					Rosetta: pointer.Bool(false),
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
+				SharedSettings: SharedSettings{
+					Snapshotters: []string{"soci"},
+				},
 			},
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
@@ -109,31 +111,35 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				deps.EXPECT().Arch().Return(runtime.GOARCH)
 			},
 			postRunCheck: func(t *testing.T, fs afero.Fs) {
-				sociFileName := fmt.Sprintf(sociFileNameFormat, sociVersion, runtime.GOARCH)
-				sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, sociVersion, sociFileName)
-				sociShaSum := sociAMD64Sha256Sum
+				sociFileName := fmt.Sprintf(sociFileNameFormat, SociVersion, runtime.GOARCH)
+				sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, SociVersion, sociFileName)
+				sociShaSum := SociAMD64Sha256Sum
 				if runtime.GOARCH == "arm64" {
-					sociShaSum = sociARM64Sha256Sum
+					sociShaSum = SociARM64Sha256Sum
 				}
-				sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, sociVersion)
+				sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, SociVersion)
+				dockerConfigSetup := `	sudo mkdir -p /etc/systemd/system/soci-snapshotter.service.d/
+	printf '[Service]\nEnvironment="DOCKER_CONFIG=$HOME/.finch-vm-config"\n' | ` +
+					`sudo tee /etc/systemd/system/soci-snapshotter.service.d/override.conf`
 				sociInstallationScript := fmt.Sprintf(sociInstallationScriptFormat,
 					sociInstallationProvisioningScriptHeader,
 					sociFileName,
 					sociDownloadURL,
 					sociShaSum,
-					sociServiceDownloadURL)
+					sociServiceDownloadURL,
+					dockerConfigSetup)
 
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
 				require.Equal(t, "2GiB", *limaCfg.Memory)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
 				require.Equal(t, "soci", limaCfg.Env["CONTAINERD_SNAPSHOTTER"])
-				require.Equal(t, sociInstallationScript, limaCfg.Provision[0].Script)
+				require.Equal(t, sociInstallationScript, *limaCfg.Provision[0].Script)
 
 				buf, err = afero.ReadFile(fs, "/default.yaml")
 				require.NoError(t, err)
@@ -142,18 +148,24 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
 			name: "doesn't add soci script and doesn't change default snapshotter when snapshotters is not set in config",
 			config: &Finch{
-				Memory:       pointer.String("2GiB"),
-				CPUs:         pointer.Int(4),
-				VMType:       pointer.String("qemu"),
-				Rosetta:      pointer.Bool(false),
-				Snapshotters: []string{},
+				SystemSettings: SystemSettings{
+					Memory:  pointer.String("2GiB"),
+					CPUs:    pointer.Int(4),
+					Rosetta: pointer.Bool(false),
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
+				SharedSettings: SharedSettings{
+					Snapshotters: []string{},
+				},
 			},
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
@@ -174,7 +186,7 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -190,18 +202,24 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
 			name: "doesn't add soci script when soci is not in snapshotters array",
 			config: &Finch{
-				Memory:       pointer.String("2GiB"),
-				CPUs:         pointer.Int(4),
-				VMType:       pointer.String("qemu"),
-				Rosetta:      pointer.Bool(false),
-				Snapshotters: []string{"overlayfs"},
+				SystemSettings: SystemSettings{
+					Memory:  pointer.String("2GiB"),
+					CPUs:    pointer.Int(4),
+					Rosetta: pointer.Bool(false),
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
+				SharedSettings: SharedSettings{
+					Snapshotters: []string{"overlayfs"},
+				},
 			},
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
@@ -222,7 +240,7 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -236,18 +254,24 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
 			name: "adds soci script but keeps overlayfs as default when soci is present in snapshotters array but not first element",
 			config: &Finch{
-				Memory:       pointer.String("2GiB"),
-				CPUs:         pointer.Int(4),
-				VMType:       pointer.String("qemu"),
-				Rosetta:      pointer.Bool(false),
-				Snapshotters: []string{"overlayfs", "soci"},
+				SystemSettings: SystemSettings{
+					Memory:  pointer.String("2GiB"),
+					CPUs:    pointer.Int(4),
+					Rosetta: pointer.Bool(false),
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
+				SharedSettings: SharedSettings{
+					Snapshotters: []string{"overlayfs", "soci"},
+				},
 			},
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
@@ -266,31 +290,35 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				deps.EXPECT().Arch().Return(runtime.GOARCH)
 			},
 			postRunCheck: func(t *testing.T, fs afero.Fs) {
-				sociFileName := fmt.Sprintf(sociFileNameFormat, sociVersion, runtime.GOARCH)
-				sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, sociVersion, sociFileName)
-				sociShaSum := sociAMD64Sha256Sum
+				sociFileName := fmt.Sprintf(sociFileNameFormat, SociVersion, runtime.GOARCH)
+				sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, SociVersion, sociFileName)
+				sociShaSum := SociAMD64Sha256Sum
 				if runtime.GOARCH == "arm64" {
-					sociShaSum = sociARM64Sha256Sum
+					sociShaSum = SociARM64Sha256Sum
 				}
-				sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, sociVersion)
+				sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, SociVersion)
+				dockerConfigSetup := `	sudo mkdir -p /etc/systemd/system/soci-snapshotter.service.d/
+	printf '[Service]\nEnvironment="DOCKER_CONFIG=$HOME/.finch-vm-config"\n' | ` +
+					`sudo tee /etc/systemd/system/soci-snapshotter.service.d/override.conf`
 				sociInstallationScript := fmt.Sprintf(sociInstallationScriptFormat,
 					sociInstallationProvisioningScriptHeader,
 					sociFileName,
 					sociDownloadURL,
 					sociShaSum,
-					sociServiceDownloadURL)
+					sociServiceDownloadURL,
+					dockerConfigSetup)
 
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
 				require.Equal(t, "2GiB", *limaCfg.Memory)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
 				require.Equal(t, "overlayfs", limaCfg.Env["CONTAINERD_SNAPSHOTTER"])
-				require.Equal(t, sociInstallationScript, limaCfg.Provision[0].Script)
+				require.Equal(t, sociInstallationScript, *limaCfg.Provision[0].Script)
 
 				buf, err = afero.ReadFile(fs, "/default.yaml")
 				require.NoError(t, err)
@@ -300,18 +328,24 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
 			name: "doesn't add soci script when snapshotter is not set in config",
 			config: &Finch{
-				Memory:       pointer.String("2GiB"),
-				CPUs:         pointer.Int(4),
-				VMType:       pointer.String("qemu"),
-				Rosetta:      pointer.Bool(false),
-				Snapshotters: []string{"soci", "overlayfs"},
+				SystemSettings: SystemSettings{
+					Memory:  pointer.String("2GiB"),
+					CPUs:    pointer.Int(4),
+					Rosetta: pointer.Bool(false),
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
+				SharedSettings: SharedSettings{
+					Snapshotters: []string{"soci", "overlayfs"},
+				},
 			},
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
@@ -330,30 +364,34 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 				deps.EXPECT().Arch().Return(runtime.GOARCH)
 			},
 			postRunCheck: func(t *testing.T, fs afero.Fs) {
-				sociFileName := fmt.Sprintf(sociFileNameFormat, sociVersion, runtime.GOARCH)
-				sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, sociVersion, sociFileName)
-				sociShaSum := sociAMD64Sha256Sum
+				sociFileName := fmt.Sprintf(sociFileNameFormat, SociVersion, runtime.GOARCH)
+				sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, SociVersion, sociFileName)
+				sociShaSum := SociAMD64Sha256Sum
 				if runtime.GOARCH == "arm64" {
-					sociShaSum = sociARM64Sha256Sum
+					sociShaSum = SociARM64Sha256Sum
 				}
-				sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, sociVersion)
+				sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, SociVersion)
+				dockerConfigSetup := `	sudo mkdir -p /etc/systemd/system/soci-snapshotter.service.d/
+	printf '[Service]\nEnvironment="DOCKER_CONFIG=$HOME/.finch-vm-config"\n' | ` +
+					`sudo tee /etc/systemd/system/soci-snapshotter.service.d/override.conf`
 				sociInstallationScript := fmt.Sprintf(sociInstallationScriptFormat,
 					sociInstallationProvisioningScriptHeader,
 					sociFileName,
 					sociDownloadURL,
 					sociShaSum,
-					sociServiceDownloadURL)
+					sociServiceDownloadURL,
+					dockerConfigSetup)
 
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
 				require.Equal(t, "2GiB", *limaCfg.Memory)
 				require.Equal(t, "soci", limaCfg.Env["CONTAINERD_SNAPSHOTTER"])
-				require.Equal(t, sociInstallationScript, limaCfg.Provision[0].Script)
+				require.Equal(t, sociInstallationScript, *limaCfg.Provision[0].Script)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
 
 				buf, err = afero.ReadFile(fs, "/default.yaml")
@@ -363,24 +401,19 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
-			name: "updates vmType and removes cross-arch provisioning script and network config",
-			config: &Finch{
-				Memory:  pointer.String("2GiB"),
-				CPUs:    pointer.Int(4),
-				VMType:  pointer.String("vz"),
-				Rosetta: pointer.Bool(true),
-			},
+			name:         "updates vmType and removes cross-arch provisioning script and network config",
+			config:       makeConfig("vz", "2GiB", 4, true),
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
 			isInit:       true,
 			mockSvc: func(
 				fs afero.Fs,
-				_ *mocks.Logger,
+				l *mocks.Logger,
 				cmd *mocks.Command,
 				creator *mocks.CommandCreator,
 				deps *mocks.LimaConfigApplierSystemDeps,
@@ -406,15 +439,21 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 		    fi
 		`), 0o600)
 				require.NoError(t, err)
-				cmd.EXPECT().Output().Return([]byte("13.0.0"), nil)
-				creator.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				// SupportsVirtualizationFramework + SupportsRosettaWithLinuxKernel6_18 each call sw_vers
+				cmd.EXPECT().Output().Return([]byte("13.0.0"), nil).Times(2)
+				creator.EXPECT().Create("sw_vers", "-productVersion").Return(cmd).Times(2)
 				deps.EXPECT().Arch().Return(runtime.GOARCH)
+				l.EXPECT().Warnf(
+					"Rosetta does not support Linux kernel 6.18 on macOS < 26. " +
+						"Please update your mac or use \"qemu\" emulator by setting " +
+						"\"rosetta: false\" in your finch.yaml",
+				)
 			},
 			postRunCheck: func(t *testing.T, fs afero.Fs) {
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -427,20 +466,19 @@ func TestDiskLimaConfigApplier_Apply(t *testing.T) {
 
 				require.Equal(t, "vz", *limaCfg.VMType)
 				require.Equal(t, "virtiofs", *limaCfg.MountType)
-				require.Equal(t, true, *limaCfg.Rosetta.BinFmt)
-				require.Equal(t, true, *limaCfg.Rosetta.Enabled)
 				require.Len(t, limaCfg.Provision, 0)
+
+				var vzOpts limatype.VZOpts
+				err = limayaml.Convert(limaCfg.VMOpts[limatype.VZ], &vzOpts, "vmOpts.vz")
+				require.Nil(t, err)
+				require.Equal(t, true, *vzOpts.Rosetta.BinFmt)
+				require.Equal(t, true, *vzOpts.Rosetta.Enabled)
 			},
 			want: nil,
 		},
 		{
-			name: "updates vmType from vz to qemu and adds cross-arch provisioning script",
-			config: &Finch{
-				Memory:  pointer.String("2GiB"),
-				CPUs:    pointer.Int(4),
-				VMType:  pointer.String("qemu"),
-				Rosetta: pointer.Bool(false),
-			},
+			name:         "updates vmType from vz to qemu and adds cross-arch provisioning script",
+			config:       makeConfig("qemu", "2GiB", 4, false),
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
 			isInit:       true,
@@ -465,7 +503,7 @@ rosetta:
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -476,22 +514,21 @@ rosetta:
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, "qemu", *limaCfg.VMType)
-				require.Equal(t, false, *limaCfg.Rosetta.Enabled)
-				require.Equal(t, false, *limaCfg.Rosetta.BinFmt)
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
+
+				var vzOpts limatype.VZOpts
+				err = limayaml.Convert(limaCfg.VMOpts[limatype.VZ], &vzOpts, "vmOpts.vz")
+				require.Nil(t, err)
+				require.Equal(t, false, *vzOpts.Rosetta.BinFmt)
+				require.Equal(t, false, *vzOpts.Rosetta.Enabled)
 			},
 			want: nil,
 		},
 		{
-			name: "does not update lima config because isInit == false",
-			config: &Finch{
-				Memory:  pointer.String("2GiB"),
-				CPUs:    pointer.Int(4),
-				VMType:  pointer.String("vz"),
-				Rosetta: pointer.Bool(false),
-			},
+			name:         "does not update lima config because isInit == false",
+			config:       makeConfig("vz", "2GiB", 4, false),
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
 			isInit:       false,
@@ -509,7 +546,7 @@ mountType: "reverse-sshfs"`), 0o600)
 			postRunCheck: func(t *testing.T, fs afero.Fs) {
 				buf, err := afero.ReadFile(fs, "/default.yaml")
 				require.NoError(t, err)
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, "qemu", *limaCfg.VMType)
@@ -519,13 +556,8 @@ mountType: "reverse-sshfs"`), 0o600)
 			want: nil,
 		},
 		{
-			name: "lima config file does not exist",
-			config: &Finch{
-				Memory:  pointer.String("2GiB"),
-				CPUs:    pointer.Int(4),
-				VMType:  pointer.String("qemu"),
-				Rosetta: pointer.Bool(false),
-			},
+			name:         "lima config file does not exist",
+			config:       makeConfig("qemu", "2GiB", 4, false),
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
 			isInit:       true,
@@ -545,7 +577,7 @@ mountType: "reverse-sshfs"`), 0o600)
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -557,18 +589,13 @@ mountType: "reverse-sshfs"`), 0o600)
 				require.NoError(t, err)
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
-			name: "lima config file does not contain valid YAML",
-			config: &Finch{
-				Memory:  pointer.String("2GiB"),
-				CPUs:    pointer.Int(4),
-				VMType:  pointer.String("qemu"),
-				Rosetta: pointer.Bool(false),
-			},
+			name:         "lima config file does not contain valid YAML",
+			config:       makeConfig("qemu", "2GiB", 4, false),
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
 			isInit:       true,
@@ -588,7 +615,7 @@ mountType: "reverse-sshfs"`), 0o600)
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -600,18 +627,25 @@ mountType: "reverse-sshfs"`), 0o600)
 				require.NoError(t, err)
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
 			},
 			want: nil,
 		},
 		{
 			name: "lima config file with additional directories",
 			config: &Finch{
-				Memory:                pointer.String("2GiB"),
-				CPUs:                  pointer.Int(4),
-				AdditionalDirectories: []AdditionalDirectory{{pointer.String("/Volumes")}},
-				VMType:                pointer.String("qemu"),
-				Rosetta:               pointer.Bool(false),
+				SystemSettings: SystemSettings{
+					Memory:                pointer.String("2GiB"),
+					CPUs:                  pointer.Int(4),
+					Rosetta:               pointer.Bool(false),
+					AdditionalDirectories: []AdditionalDirectory{{pointer.String("/Volumes")}},
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
+				SharedSettings: SharedSettings{
+					Snapshotters: []string{"soci", "overlayfs"},
+				},
 			},
 			defaultPath:  "/default.yaml",
 			overridePath: "/override.yaml",
@@ -621,18 +655,19 @@ mountType: "reverse-sshfs"`), 0o600)
 				_ *mocks.Logger,
 				cmd *mocks.Command,
 				creator *mocks.CommandCreator,
-				_ *mocks.LimaConfigApplierSystemDeps,
+				deps *mocks.LimaConfigApplierSystemDeps,
 			) {
 				err := afero.WriteFile(fs, "/lima.yaml", []byte("memory: 4GiB\ncpus: 8"), 0o600)
 				require.NoError(t, err)
 				cmd.EXPECT().Output().Return([]byte("13.0.0"), nil)
 				creator.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				deps.EXPECT().Arch()
 			},
 			postRunCheck: func(t *testing.T, fs afero.Fs) {
 				buf, err := afero.ReadFile(fs, "/override.yaml")
 				require.NoError(t, err)
 
-				var limaCfg limayaml.LimaYAML
+				var limaCfg limatype.LimaYAML
 				err = yaml.Unmarshal(buf, &limaCfg)
 				require.NoError(t, err)
 				require.Equal(t, 4, *limaCfg.CPUs)
@@ -647,14 +682,47 @@ mountType: "reverse-sshfs"`), 0o600)
 				require.NoError(t, err)
 				require.Equal(t, "reverse-sshfs", *limaCfg.MountType)
 				require.Equal(t, "system", limaCfg.Provision[0].Mode)
-				require.Equal(t, qemuPkgScriptWithHeader, limaCfg.Provision[0].Script)
+				require.Equal(t, qemuPkgScriptWithHeader, *limaCfg.Provision[0].Script)
+			},
+			want: nil,
+		},
+		{
+			name:         "sets mountInotify when experimental feature is enabled",
+			config:       makeExperimentalConfig("qemu", "2GiB", 4, false, SharedExperimentalSettings{MountInotify: true}),
+			defaultPath:  "/default.yaml",
+			overridePath: "/override.yaml",
+			isInit:       true,
+			mockSvc: func(
+				_ afero.Fs,
+				_ *mocks.Logger,
+				cmd *mocks.Command,
+				creator *mocks.CommandCreator,
+				_ *mocks.LimaConfigApplierSystemDeps,
+			) {
+				cmd.EXPECT().Output().Return([]byte("13.0.0"), nil)
+				creator.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+			},
+			postRunCheck: func(t *testing.T, fs afero.Fs) {
+				buf, err := afero.ReadFile(fs, "/override.yaml")
+				require.NoError(t, err)
+
+				var limaCfg limatype.LimaYAML
+				err = yaml.Unmarshal(buf, &limaCfg)
+				require.NoError(t, err)
+				require.Equal(t, 4, *limaCfg.CPUs)
+				require.Equal(t, "2GiB", *limaCfg.Memory)
+
+				buf, err = afero.ReadFile(fs, "/default.yaml")
+				require.NoError(t, err)
+				err = yaml.Unmarshal(buf, &limaCfg)
+				require.NoError(t, err)
+				require.Equal(t, true, *limaCfg.MountInotify)
 			},
 			want: nil,
 		},
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -677,7 +745,7 @@ mountType: "reverse-sshfs"`), 0o600)
 					tc.overridePath,
 					deps,
 					finchConfigPath,
-				).ConfigureDefaultLimaYaml()
+				).ConfigureDefaultLimaYaml(l)
 				_ = NewLimaApplier(
 					tc.config,
 					cmdCreator,

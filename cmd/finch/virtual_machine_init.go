@@ -1,10 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build darwin || windows
+
 package main
 
 import (
 	"fmt"
+	"runtime"
 
 	"github.com/runfinch/finch/pkg/disk"
 
@@ -19,7 +22,7 @@ import (
 )
 
 func newInitVMCommand(
-	lcc command.LimaCmdCreator,
+	ncc command.NerdctlCmdCreator,
 	logger flog.Logger,
 	optionalDepGroups []*dependency.Group,
 	lca config.LimaConfigApplier,
@@ -28,12 +31,13 @@ func newInitVMCommand(
 	fs afero.Fs,
 	privateKeyPath string,
 	diskManager disk.UserDataDiskManager,
+	finchConfig *config.Finch,
 ) *cobra.Command {
 	initVMCommand := &cobra.Command{
 		Use:      "init",
 		Short:    "Initialize the virtual machine",
-		RunE:     newInitVMAction(lcc, logger, optionalDepGroups, lca, baseYamlFilePath, diskManager).runAdapter,
-		PostRunE: newPostVMStartInitAction(logger, lcc, fs, privateKeyPath, nca).runAdapter,
+		RunE:     newInitVMAction(ncc, logger, optionalDepGroups, lca, baseYamlFilePath, diskManager, finchConfig).runAdapter,
+		PostRunE: newPostVMStartInitAction(logger, ncc, fs, privateKeyPath, nca).runAdapter,
 	}
 
 	return initVMCommand
@@ -41,20 +45,22 @@ func newInitVMCommand(
 
 type initVMAction struct {
 	baseYamlFilePath  string
-	creator           command.LimaCmdCreator
+	creator           command.NerdctlCmdCreator
 	logger            flog.Logger
 	optionalDepGroups []*dependency.Group
 	limaConfigApplier config.LimaConfigApplier
 	diskManager       disk.UserDataDiskManager
+	finchConfig       *config.Finch
 }
 
 func newInitVMAction(
-	creator command.LimaCmdCreator,
+	creator command.NerdctlCmdCreator,
 	logger flog.Logger,
 	optionalDepGroups []*dependency.Group,
 	lca config.LimaConfigApplier,
 	baseYamlFilePath string,
 	diskManager disk.UserDataDiskManager,
+	finchConfig *config.Finch,
 ) *initVMAction {
 	return &initVMAction{
 		creator:           creator,
@@ -63,6 +69,7 @@ func newInitVMAction(
 		limaConfigApplier: lca,
 		baseYamlFilePath:  baseYamlFilePath,
 		diskManager:       diskManager,
+		finchConfig:       finchConfig,
 	}
 }
 
@@ -76,7 +83,7 @@ func (iva *initVMAction) run() error {
 		return err
 	}
 
-	err = iva.limaConfigApplier.ConfigureDefaultLimaYaml()
+	err = iva.limaConfigApplier.ConfigureDefaultLimaYaml(iva.logger)
 	if err != nil {
 		return err
 	}
@@ -100,7 +107,15 @@ func (iva *initVMAction) run() error {
 	}
 
 	instanceName := fmt.Sprintf("--name=%v", limaInstanceName)
-	limaCmd := iva.creator.CreateWithoutStdio("start", instanceName, iva.baseYamlFilePath, "--tty=false")
+	startOpts := []string{"start", instanceName, iva.baseYamlFilePath, "--tty=false"}
+	if iva.finchConfig == nil || *iva.finchConfig.VMType == "vz" {
+		// Starting with 2.0, Lima uses ssh over vsock by default on systemd >= 256 (https://github.com/lima-vm/lima/pull/3979)
+		// which is causing a ssh "permission denied" issue with VZ driver.
+		// So, disabling this feature for VZ driver for now.
+		// This still works with QEMU driver.
+		startOpts = append(startOpts, "--set", ".ssh.overVsock=false")
+	}
+	limaCmd := iva.creator.CreateWithoutStdio(startOpts...)
 
 	iva.logger.Info("Initializing and starting Finch virtual machine...")
 	logs, err := limaCmd.CombinedOutput()
@@ -112,6 +127,17 @@ func (iva *initVMAction) run() error {
 		_ = iva.diskManager.DetachUserDataDisk()
 		return err
 	}
+
+	if runtime.GOOS == "windows" {
+		iva.logger.Warnln("Finch on Windows uses WSL, which mounts the C Drive in read-write mode by default. " +
+			"To run finch with more restricted access, follow " +
+			"https://runfinch.com/docs/managing-finch/windows/wsl-configuration/")
+	}
+
+	iva.logger.Warnln("Please note that Finch is a developer tool and is not meant for use in production environments, " +
+		"especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows " +
+		"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
+
 	iva.logger.Info("Finch virtual machine started successfully")
 	return nil
 }

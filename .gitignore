@@ -7,9 +7,11 @@ _vde_output/
 **/*.tar.gz
 **/*.lz4
 **/*.img
+cov/
 tmp/
 .vscode/
 tools_bin/
 test-coverage.*
 *.syso
 msi-builder/build/
+contrib/packaging/rpm/rpmbuild

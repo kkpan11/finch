@@ -29,35 +29,37 @@ type AdditionalDirectory struct {
 	Path *string `yaml:"path"`
 }
 
-// Finch represents the configuration file for Finch CLI.
-type Finch struct {
-	CPUs   *int    `yaml:"cpus,omitempty"`
-	Memory *string `yaml:"memory,omitempty"`
-	// Snapshotters: the snapshotters that will be installed and configured automatically on vm init or on vm start.
-	// Values: `soci` for SOCI snapshotter; `overlayfs` for default overlay snapshotter.
-	Snapshotters []string `yaml:"snapshotters,omitempty"`
-	// CredsHelper: the list of credential helpers that will be installed and configured automatically on vm init or on vm start
-	CredsHelpers []string `yaml:"creds_helpers,omitempty"`
-	// AdditionalDirectories are the work directories that are not supported by default. In macOS, only home directory is supported by default.
-	// For example, if you want to mount a directory into a container, and that directory is not under your home directory,
-	// then you'll need to specify this field to add that directory or any ascendant of it as a work directory.
-	AdditionalDirectories []AdditionalDirectory `yaml:"additional_directories,omitempty"`
-	// VMType sets which technology to use for Finch's VM.
-	// Currently supports `qemu` and `vz` (Virtualization.framework).
-	// Also sets mountType to "virtiofs", instead of the default "reverse-sshfs"
-	// Requires macOS 13.0 or later.
-	// This setting will only be applied on vm init.
-	VMType *limayaml.VMType `yaml:"vmType,omitempty"`
-	// Use Rosetta 2 when available. Forces vmType to "vz" (Virtualization.framework) if set to `true`.
-	// Requires macOS 13.0 or later and an Apple Silicon (ARM64) mac.
-	// Has no effect on systems where Rosetta 2 is not available (Intel/AMD64 macs, or macOS < 13.0).
-	// This setting will only be applied on vm init.
-	Rosetta *bool `yaml:"rosetta,omitempty"`
+// SharedSystemSettings represents all settings shared by virtualized Finch configurations.
+type SharedSystemSettings struct {
+	VMType      *limayaml.VMType `yaml:"vmType,omitempty"`
+	AutoVMStart *bool            `yaml:"auto_vm_start,omitempty"`
+}
+
+// SharedSettings represents settings shared by all Finch configurations.
+type SharedSettings struct {
+	Snapshotters []string                   `yaml:"snapshotters,omitempty"`
+	CredsHelpers []string                   `yaml:"creds_helpers,omitempty"`
+	Experimental SharedExperimentalSettings `yaml:"experimental,omitempty"`
+	DockerCompat bool                       `yaml:"dockercompat,omitempty"`
+}
+
+// AutoVMStartEnabled returns whether automatic VM start is enabled.
+// Defaults to true if not explicitly set.
+func (s *SharedSystemSettings) AutoVMStartEnabled() bool {
+	if s.AutoVMStart == nil {
+		return true
+	}
+	return *s.AutoVMStart
+}
+
+// SharedExperimentalSettings represents available experimental settings shared
+// by all Finch configurations.
+type SharedExperimentalSettings struct {
+	MountInotify bool `yaml:"mountInotify,omitempty"`
 }
 
 // Nerdctl is a copy from github.com/containerd/nerdctl/cmd/nerdctl/main.go
-// TODO: make PR to nerdctl repo to move this config out of the main package
-// so it can be imported on macOS.
+// TODO: this should be importable on macOS once nerdctl v2 is released.
 type Nerdctl struct {
 	Debug            bool     `toml:"debug,omitempty"`
 	DebugFull        bool     `toml:"debug_full1,omitempty"`
@@ -74,14 +76,18 @@ type Nerdctl struct {
 
 // VMConfigOpts represents the Options for finch vm settings command.
 type VMConfigOpts struct {
-	CPUs   int
-	Memory string
+	CPUs     *int
+	Memory   *string
+	BootDisk *string
+	DataDisk *string
 }
 
-// Default values for the command line arguments --cpus and --memory.
+// Default values for the command line arguments --cpus, --memory, --bootdisk and --datadisk.
 const (
-	DefaultCPUs   = 0
-	DefaultMemory = ""
+	DefaultCPUs     = 0
+	DefaultMemory   = ""
+	DefaultBootDisk = ""
+	DefaultDataDisk = ""
 )
 
 // LimaConfigApplier applies lima configuration changes.
@@ -89,7 +95,7 @@ const (
 //go:generate mockgen -copyright_file=../../copyright_header -destination=../mocks/pkg_config_lima_config_applier.go -package=mocks -mock_names LimaConfigApplier=LimaConfigApplier . LimaConfigApplier
 type LimaConfigApplier interface {
 	ConfigureOverrideLimaYaml() error
-	ConfigureDefaultLimaYaml() error
+	ConfigureDefaultLimaYaml(logger flog.Logger) error
 	GetFinchConfigPath() string
 }
 
@@ -153,7 +159,7 @@ func Load(
 				return nil, fmt.Errorf("failed to ensure %q directory: %w", cfgPath, err)
 			}
 			if err := writeConfig(defCfg, fs, cfgPath); err != nil {
-				return nil, err
+				log.Warnf("Could not save default values to %q: %v", cfgPath, err)
 			}
 			return defCfg, nil
 		}
@@ -175,58 +181,4 @@ func Load(
 	}
 
 	return defCfg, nil
-}
-
-// loadFinchConfig Load Finch's configuration from a YAML file.
-func loadFinchConfig(fs afero.Fs, finchConfigPath string, logger flog.Logger, systemDeps LoadSystemDeps, mem fmemory.Memory) (*Finch, error) {
-	b, err := afero.ReadFile(fs, finchConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var cfg Finch
-	if err := yaml.Unmarshal(b, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config file: %w", err)
-	}
-	if err := validate(&cfg, logger, systemDeps, mem); err != nil {
-		return nil, fmt.Errorf("failed to validate config file: %w", err)
-	}
-
-	return &cfg, nil
-}
-
-// ModifyFinchConfig Modify Finch's configuration from user inputs.
-func ModifyFinchConfig(fs afero.Fs, logger flog.Logger, finchConfigPath string, opts VMConfigOpts) (bool, error) {
-	var isConfigUpdated bool
-
-	systemDeps := system.NewStdLib()
-	mem := fmemory.NewMemory()
-
-	finchCfg, err := loadFinchConfig(fs, finchConfigPath, logger, systemDeps, mem)
-	if err != nil {
-		return isConfigUpdated, err
-	}
-
-	cpus, memory := opts.CPUs, opts.Memory
-	if cpus != DefaultCPUs && cpus != *finchCfg.CPUs {
-		*finchCfg.CPUs = cpus
-		isConfigUpdated = true
-	}
-	if memory != DefaultMemory && memory != *finchCfg.Memory {
-		*finchCfg.Memory = memory
-		isConfigUpdated = true
-	}
-
-	if !isConfigUpdated {
-		return isConfigUpdated, fmt.Errorf("the number of CPUs or the amount of memory should be at least one valid value")
-	}
-
-	if err := validate(finchCfg, logger, systemDeps, mem); err != nil {
-		return false, fmt.Errorf("failed to validate config file: %w", err)
-	}
-	if err := writeConfig(finchCfg, fs, finchConfigPath); err != nil {
-		return false, err
-	}
-
-	return isConfigUpdated, nil
 }

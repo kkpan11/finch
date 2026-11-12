@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -45,7 +46,7 @@ var testCosign = func(o *option.Option) {
 			htpasswdDir := filepath.Dir(ffs.CreateTempFile(filename, htpasswd))
 			ginkgo.DeferCleanup(os.RemoveAll, htpasswdDir)
 			port = fnet.GetFreePort()
-			command.Run(o, "run",
+			containerID := command.StdoutStr(o, "run",
 				"-dp", fmt.Sprintf("%d:5000", port),
 				"--name", "registry",
 				"-v", fmt.Sprintf("%s:/auth", htpasswdDir),
@@ -53,6 +54,17 @@ var testCosign = func(o *option.Option) {
 				"-e", "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm",
 				"-e", fmt.Sprintf("REGISTRY_AUTH_HTPASSWD_PATH=/auth/%s", filename),
 				registryImage)
+			// Wait for container to be running
+			tries := 0
+			for command.StdoutStr(o, "inspect", "-f", "{{.State.Running}}", containerID) != "true" {
+				if tries >= 5 {
+					ginkgo.Fail("Registry container failed to start after 5 seconds")
+				}
+				time.Sleep(1 * time.Second)
+				tries++
+			}
+			// Wait for registry service to be ready
+			time.Sleep(10 * time.Second)
 			registry = fmt.Sprintf(`localhost:%d`, port)
 			tag = fmt.Sprintf(`%s/test-login:tag`, registry)
 		})
@@ -72,10 +84,14 @@ var testCosign = func(o *option.Option) {
 			command.Run(o, "pull", "--verify=cosign", "--cosign-key=./cosign_data/test-1.pub", tag)
 			command.Run(o, "run", "-d", "--verify=cosign", "--cosign-key=./cosign_data/test-1.pub", tag)
 
+			noMatchErr := gomega.SatisfyAny(
+				gomega.ContainSubstring("no matching signatures"),
+				gomega.ContainSubstring("no matching attestations"),
+			)
 			gomega.Expect(command.RunWithoutSuccessfulExit(o, "pull", "--verify=cosign", "--cosign-key=./cosign_data/test-2.pub",
-				tag).Err.Contents()).Should(gomega.ContainSubstring("no matching signatures"))
+				tag).Err.Contents()).Should(noMatchErr)
 			gomega.Expect(command.RunWithoutSuccessfulExit(o, "run", "-d", "--verify=cosign", "--cosign-key=./cosign_data/test-2.pub",
-				tag).Err.Contents()).Should(gomega.ContainSubstring("no matching signatures"))
+				tag).Err.Contents()).Should(noMatchErr)
 		})
 	})
 }

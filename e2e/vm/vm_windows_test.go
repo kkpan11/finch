@@ -33,9 +33,27 @@ func TestVM(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// These steps also test the following state changes. This is not repeated in lifecycle test
+	// Test Stopped -> Nonexistent
+	// Test Nonexistent -> Running
 	ginkgo.SynchronizedBeforeSuite(func() []byte {
+		// Ensure DOCKER_CONFIG is set to %LOCALAPPDATA%\.finch
+		finchRootDir := os.Getenv("LOCALAPPDATA")
+		finchConfigDir := filepath.Clean(filepath.Join(finchRootDir, ".finch"))
+		_ = os.MkdirAll(finchConfigDir, 0o700)
+		o.UpdateEnv("DOCKER_CONFIG", finchConfigDir)
+		// Ensure empty /.finch/config.json
+		configPath := filepath.Join(finchConfigDir, "config.json")
+		_ = os.WriteFile(configPath, []byte("{}"), 0o644)
+
 		resetDisks(o, *e2e.Installed)
-		command.New(o, "vm", "init").WithTimeoutInSeconds(160).Run()
+		command.New(o, "vm", "stop", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(30).Run()
+		time.Sleep(1 * time.Second)
+		command.New(o, "vm", "remove", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(20).Run()
+		gomega.Expect(command.StdoutStr(o, virtualMachineRootCmd, "status")).To(gomega.Equal("Nonexistent"))
+		time.Sleep(1 * time.Second)
+		command.New(o, "vm", "init").WithoutCheckingExitCode().WithTimeoutInSeconds(160).Run()
+		gomega.Expect(command.StdoutStr(o, virtualMachineRootCmd, "status")).To(gomega.Equal("Running"))
 		return nil
 	}, func(_ []byte) {})
 
@@ -46,6 +64,12 @@ func TestVM(t *testing.T) {
 	}, func() {})
 
 	ginkgo.Describe("", func() {
+		/*
+			TODO: Fix issue with prune in windows. Error:
+			failed marshalling json out of network configuration file \"/etc/cni/net.d/nerdctl-bridge.conflist\":
+			error parsing configuration list:unexpected end of JSON input\nFor details on the schema"
+		*/
+		// testVMPrune(o, *e2e.Installed)
 		testVMLifecycle(o)
 		testAdditionalDisk(o, *e2e.Installed)
 		testFinchConfigFile(o)
@@ -53,6 +77,8 @@ func TestVM(t *testing.T) {
 		testSupportBundle(o)
 		testCredHelper(o, *e2e.Installed, *e2e.Registry)
 		testSoci(o, *e2e.Installed)
+		testMSIInstallPermission(o, *e2e.Installed)
+		testAutoVMStart(o)
 	})
 
 	gomega.RegisterFailHandler(ginkgo.Fail)

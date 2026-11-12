@@ -1,6 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build darwin || windows
+
 package config
 
 import (
@@ -10,11 +12,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xorcare/pointer"
+	"go.uber.org/mock/gomock"
 
 	"github.com/runfinch/finch/pkg/mocks"
 )
@@ -45,7 +47,11 @@ func Test_updateEnvironment(t *testing.T) {
 		{
 			name: "happy path",
 			cfg: &Finch{
-				VMType: pointer.String("qemu"),
+				SystemSettings: SystemSettings{
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
 			},
 			finchDir:      "/finch/dir",
 			homeDir:       "/home/dir",
@@ -60,16 +66,22 @@ func Test_updateEnvironment(t *testing.T) {
 					string(`
 FINCH_DIR=/finch/dir
 AWS_DIR=/home/dir/.aws
-export DOCKER_CONFIG="$FINCH_DIR"
-[ -L /usr/local/bin/docker-credential-ecr-login ] || sudo ln -s "$FINCH_DIR"/cred-helpers/docker-credential-ecr-login /usr/local/bin/
-[ -L /root/.aws ] || sudo ln -fs "$AWS_DIR" /root/.aws`), string(fileBytes))
+mkdir -p "$HOME/.finch-vm-config"
+export DOCKER_CONFIG="$HOME/.finch-vm-config"
+echo '{"credsStore": "finchhost"}' > "$DOCKER_CONFIG/config.json"
+[ -L /root/.aws ] || sudo ln -fsn "$AWS_DIR" /root/.aws
+[ -L /home/mock_user.linux/.finch ] || ln -s $FINCH_DIR /home/mock_user.linux/.finch`), string(fileBytes))
 			},
 			want: nil,
 		},
 		{
 			name: "happy path, file already exists and already contains expected variables",
 			cfg: &Finch{
-				VMType: pointer.String("qemu"),
+				SystemSettings: SystemSettings{
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
 			},
 			finchDir:      "/finch/dir",
 			homeDir:       "/home/dir",
@@ -84,8 +96,8 @@ export DOCKER_CONFIG="$FINCH_DIR"
 FINCH_DIR=/finch/dir
 AWS_DIR=/home/dir/.aws
 export DOCKER_CONFIG="$FINCH_DIR"
-[ -L /usr/local/bin/docker-credential-ecr-login ] || sudo ln -s "$FINCH_DIR"/cred-helpers/docker-credential-ecr-login /usr/local/bin/
-[ -L /root/.aws ] || sudo ln -fs "$AWS_DIR" /root/.aws)`,
+[ -L /root/.aws ] || sudo ln -fsn "$AWS_DIR" /root/.aws)
+[ -L /home/mock_user.linux/.finch ] || ln -s $FINCH_DIR /home/mock_user.linux/.finch`,
 						),
 						0o644,
 					),
@@ -98,15 +110,22 @@ export DOCKER_CONFIG="$FINCH_DIR"
 FINCH_DIR=/finch/dir
 AWS_DIR=/home/dir/.aws
 export DOCKER_CONFIG="$FINCH_DIR"
-[ -L /usr/local/bin/docker-credential-ecr-login ] || sudo ln -s "$FINCH_DIR"/cred-helpers/docker-credential-ecr-login /usr/local/bin/
-[ -L /root/.aws ] || sudo ln -fs "$AWS_DIR" /root/.aws)`), string(fileBytes))
+[ -L /root/.aws ] || sudo ln -fsn "$AWS_DIR" /root/.aws)
+[ -L /home/mock_user.linux/.finch ] || ln -s $FINCH_DIR /home/mock_user.linux/.finch
+mkdir -p "$HOME/.finch-vm-config"
+export DOCKER_CONFIG="$HOME/.finch-vm-config"
+echo '{"credsStore": "finchhost"}' > "$DOCKER_CONFIG/config.json"`), string(fileBytes))
 			},
 			want: nil,
 		},
 		{
 			name: ".bashrc file doesn't exist",
 			cfg: &Finch{
-				VMType: pointer.String("qemu"),
+				SystemSettings: SystemSettings{
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("qemu"),
+					},
+				},
 			},
 			finchDir:      "/finch/dir",
 			homeDir:       "/home/dir",
@@ -123,10 +142,78 @@ export DOCKER_CONFIG="$FINCH_DIR"
 				},
 			),
 		},
+		{
+			name: "WSL2 basic configuration",
+			cfg: &Finch{
+				SystemSettings: SystemSettings{
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("wsl2"),
+					},
+				},
+			},
+			finchDir:      "/finch/dir",
+			homeDir:       "/home/dir",
+			limaVMHomeDir: "/home/mock_user.linux/",
+			mockSvc: func(t *testing.T, fs afero.Fs) {
+				require.NoError(t, afero.WriteFile(fs, "/home/mock_user.linux/.bashrc", []byte(""), 0o644))
+			},
+			postRunCheck: func(t *testing.T, fs afero.Fs) {
+				fileBytes, err := afero.ReadFile(fs, "/home/mock_user.linux/.bashrc")
+				require.NoError(t, err)
+				assert.Equal(t, string(`
+FINCH_DIR="$(/usr/bin/wslpath '/finch/dir')"
+AWS_DIR="$(/usr/bin/wslpath '/home/dir/.aws')"
+export DOCKER_CONFIG="$FINCH_DIR"
+[ -L /root/.aws ] || sudo ln -fsn "$AWS_DIR" /root/.aws
+[ -L /home/mock_user.linux/.finch ] || ln -s $FINCH_DIR /home/mock_user.linux/.finch`), string(fileBytes))
+			},
+			want: nil,
+		},
+		{
+			name: "WSL2 with credential helpers in PATH",
+			cfg: &Finch{
+				SystemSettings: SystemSettings{
+					SharedSystemSettings: SharedSystemSettings{
+						VMType: pointer.String("wsl2"),
+					},
+				},
+				SharedSettings: SharedSettings{
+					CredsHelpers: []string{"ecr-login", "secretservice"},
+				},
+			},
+			finchDir:      "/finch/dir",
+			homeDir:       "/home/dir",
+			limaVMHomeDir: "/home/mock_user.linux",
+			mockSvc: func(t *testing.T, fs afero.Fs) {
+				require.NoError(t, afero.WriteFile(fs, "/home/mock_user.linux/.bashrc", []byte(""), 0o644))
+			},
+			postRunCheck: func(t *testing.T, fs afero.Fs) {
+				fileBytes, err := afero.ReadFile(fs, "/home/mock_user.linux/.bashrc")
+				require.NoError(t, err)
+				assert.Equal(t, string(
+					"\nFINCH_DIR=\"$(/usr/bin/wslpath '/finch/dir')\"\n"+
+						"AWS_DIR=\"$(/usr/bin/wslpath '/home/dir/.aws')\"\n"+
+						"export DOCKER_CONFIG=\"$FINCH_DIR\"\n"+
+						"[ -L /root/.aws ] || sudo ln -fsn \"$AWS_DIR\" /root/.aws\n"+
+						"([ -e \"$FINCH_DIR\"/cred-helpers/docker-credential-ecr-login ] || \\\n"+
+						"\t\t\t(echo \"error: docker-credential-ecr-login not found in "+
+						"$FINCH_DIR/cred-helpers directory.\")) && \\\n"+
+						"\t\t\t([ -L /usr/local/bin/docker-credential-ecr-login ] || "+
+						"sudo ln -s \"$FINCH_DIR\"/cred-helpers/docker-credential-ecr-login /usr/local/bin)\n"+
+						"([ -e \"$FINCH_DIR\"/cred-helpers/docker-credential-secretservice ] || \\\n"+
+						"\t\t\t(echo \"error: docker-credential-secretservice not found in "+
+						"$FINCH_DIR/cred-helpers directory.\")) && \\\n"+
+						"\t\t\t([ -L /usr/local/bin/docker-credential-secretservice ] || "+
+						"sudo ln -s \"$FINCH_DIR\"/cred-helpers/docker-credential-secretservice /usr/local/bin)\n"+
+						"[ -L /home/mock_user.linux/.finch ] || ln -s $FINCH_DIR /home/mock_user.linux/.finch"),
+					string(fileBytes),
+				)
+			},
+			want: nil,
+		},
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -210,7 +297,6 @@ func Test_updateNerdctlConfig(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -244,12 +330,10 @@ func TestNerdctlConfigApplier_Apply(t *testing.T) {
 			remoteAddr: "",
 			mockSvc: func(_ *testing.T, _ afero.Fs, _ *mocks.Dialer) {
 			},
-			want: fmt.Errorf(
-				"failed to create ssh client config: %w",
-				fmt.Errorf(
-					"failed to open private key file: %w",
-					&fs.PathError{Op: "open", Path: privateKeyPath, Err: errors.New("file does not exist")},
-				),
+			want: fmt.Errorf("failed to create ssh client config: %w", fmt.Errorf(
+				"failed to open private key file: %w",
+				&fs.PathError{Op: "open", Path: privateKeyPath, Err: errors.New("file does not exist")},
+			),
 			),
 		},
 		{
@@ -267,7 +351,6 @@ func TestNerdctlConfigApplier_Apply(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

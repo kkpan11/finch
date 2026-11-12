@@ -1,26 +1,35 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build darwin || windows
+
 package config
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/lima-vm/lima/pkg/limayaml"
+	"github.com/lima-vm/lima/v2/pkg/limatype"
 	"github.com/spf13/afero"
 	"github.com/xorcare/pointer"
 	"golang.org/x/exp/slices"
 	"gopkg.in/yaml.v3"
 
 	"github.com/runfinch/finch/pkg/command"
+	"github.com/runfinch/finch/pkg/flog"
 	"github.com/runfinch/finch/pkg/system"
 )
 
+var (
+	// SociVersion will be injected via Makefile.
+	SociVersion string
+	// SociAMD64Sha256Sum will be injected via Makefile.
+	SociAMD64Sha256Sum string
+	// SociARM64Sha256Sum will be injected via Makefile.
+	SociARM64Sha256Sum string
+)
+
 const (
-	sociVersion                              = "0.5.0"
-	sociAMD64Sha256Sum                       = "768f73dbd2c772386df1d12d0a371e9cbcefebea4856623335a2e8ea5170691c"
-	sociARM64Sha256Sum                       = "9238e00426ec67a725d511e232476248f2379d66a4ccab224a50ad4c56a0292e"
 	snapshotterProvisioningScriptHeader      = "# snapshotter provisioning script"
 	sociInstallationProvisioningScriptHeader = snapshotterProvisioningScriptHeader + ": soci"
 	sociFileNameFormat                       = "soci-snapshotter-%s-linux-%s.tar.gz"
@@ -41,7 +50,7 @@ if [ ! -f /usr/local/bin/soci ]; then
 	  (echo "error: shasum verification failed for SOCI release tarball" && rm -f "${release_tarball}" && exit 1)
 
 	# move to usr/local/bin
-	tar -C /usr/local/bin -xvf ${release_tarball} ./soci ./soci-snapshotter-grpc
+	tar -C /usr/local/bin -xvf ${release_tarball} soci soci-snapshotter-grpc
 
 	# install as a systemd service
 	curl --retry 2 --retry-max-time 120 -OL "%s"
@@ -51,6 +60,7 @@ if [ ! -f /usr/local/bin/soci ]; then
 	systemctl daemon-reload
 	sudo mkdir -p /usr/local/lib/systemd/system/soci-snapshotter.service.d/
 	printf '[Unit]\nPartOf=containerd.service\n\n[Service]\nKillSignal=SIGTERM\n' | sudo tee /usr/local/lib/systemd/system/soci-snapshotter.service.d/finch.conf
+%s
 	systemctl enable --now soci-snapshotter
 fi
 
@@ -125,19 +135,25 @@ func NewLimaApplier(
 
 // ConfigureDefaultLimaYaml writes Lima-specific config values from Finch's config to default.yaml at lima config file path.
 // ConfigureDefaultLimaYaml will create a default.yaml at the path if it does not exist.
-func (lca *limaConfigApplier) ConfigureDefaultLimaYaml() error {
+func (lca *limaConfigApplier) ConfigureDefaultLimaYaml(logger flog.Logger) error {
 	if err := afero.WriteFile(lca.fs, lca.limaDefaultConfigPath, []byte(""), 0o600); err != nil {
 		return fmt.Errorf("failed to create the an empty lima config file: %w", err)
 	}
 
-	var limaCfg limayaml.LimaYAML
+	var limaCfg limatype.LimaYAML
+	var vzOpts limatype.VZOpts
+	vzOpts.Rosetta.Enabled = pointer.Bool(false)
+	vzOpts.Rosetta.BinFmt = pointer.Bool(false)
+	if limaCfg.VMOpts == nil {
+		limaCfg.VMOpts = make(map[limatype.VMType]any)
+	}
+	limaCfg.VMOpts[limatype.VZ] = &vzOpts
 
-	if limaCfg.Rosetta.Enabled == nil {
-		limaCfg.Rosetta.Enabled = pointer.Bool(false)
-		limaCfg.Rosetta.BinFmt = pointer.Bool(false)
+	if lca.cfg.Experimental.MountInotify {
+		limaCfg.MountInotify = pointer.Bool(lca.cfg.Experimental.MountInotify)
 	}
 
-	cfgAfterInit, err := lca.configureVirtualizationFramework(&limaCfg)
+	cfgAfterInit, err := lca.configureVirtualizationFramework(&limaCfg, logger)
 	if err != nil {
 		return fmt.Errorf("failed to apply init-only config values: %w", err)
 	}
@@ -161,19 +177,15 @@ func (lca *limaConfigApplier) ConfigureOverrideLimaYaml() error {
 	if err := afero.WriteFile(lca.fs, lca.limaOverrideConfigPath, []byte(""), 0o600); err != nil {
 		return fmt.Errorf("failed to create the an empty lima config file: %w", err)
 	}
-	var limaCfg limayaml.LimaYAML
+	var limaCfg limatype.LimaYAML
 
-	limaCfg.CPUs = lca.cfg.CPUs
-	limaCfg.Memory = lca.cfg.Memory
-	limaCfg.Mounts = []limayaml.Mount{}
-	for _, ad := range lca.cfg.AdditionalDirectories {
-		limaCfg.Mounts = append(limaCfg.Mounts, limayaml.Mount{
-			Location: *ad.Path, Writable: pointer.Bool(true),
-		})
-	}
+	lca.configureCPUs(&limaCfg)
+	lca.configureMemory(&limaCfg)
+	lca.configureMounts(&limaCfg)
+	lca.configureDisk(&limaCfg)
 
 	if *lca.cfg.VMType != "wsl2" && len(limaCfg.AdditionalDisks) == 0 {
-		limaCfg.AdditionalDisks = append(limaCfg.AdditionalDisks, limayaml.Disk{
+		limaCfg.AdditionalDisks = append(limaCfg.AdditionalDisks, limatype.Disk{
 			Name: "finch",
 		})
 	}
@@ -212,7 +224,7 @@ func validateSnapshotter(snapshotter string) error {
 	return nil
 }
 
-func (lca *limaConfigApplier) configureDefaultSnapshotter(limaCfg *limayaml.LimaYAML) error {
+func (lca *limaConfigApplier) configureDefaultSnapshotter(limaCfg *limatype.LimaYAML) error {
 	if len(lca.cfg.Snapshotters) == 0 {
 		limaCfg.Env = map[string]string{}
 		return nil
@@ -229,7 +241,7 @@ func (lca *limaConfigApplier) configureDefaultSnapshotter(limaCfg *limayaml.Lima
 	return nil
 }
 
-func (lca *limaConfigApplier) provisionSnapshotters(limaCfg *limayaml.LimaYAML) error {
+func (lca *limaConfigApplier) provisionSnapshotters(limaCfg *limatype.LimaYAML) error {
 	for _, snapshotter := range lca.cfg.Snapshotters {
 		switch snapshotter {
 		case "soci":
@@ -244,40 +256,55 @@ func (lca *limaConfigApplier) provisionSnapshotters(limaCfg *limayaml.LimaYAML) 
 	return nil
 }
 
-func (lca *limaConfigApplier) provisionSociSnapshotter(limaCfg *limayaml.LimaYAML) {
+func (lca *limaConfigApplier) provisionSociSnapshotter(limaCfg *limatype.LimaYAML) {
 	arch := lca.systemDeps.Arch()
-	sociFileName := fmt.Sprintf(sociFileNameFormat, sociVersion, arch)
-	sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, sociVersion, sociFileName)
-	sociSha256Sum := sociAMD64Sha256Sum
+	sociFileName := fmt.Sprintf(sociFileNameFormat, SociVersion, arch)
+	sociDownloadURL := fmt.Sprintf(sociDownloadURLFormat, SociVersion, sociFileName)
+	sociSha256Sum := SociAMD64Sha256Sum
 	if arch == "arm64" {
-		sociSha256Sum = sociARM64Sha256Sum
+		sociSha256Sum = SociARM64Sha256Sum
 	}
-	sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, sociVersion)
+	sociServiceDownloadURL := fmt.Sprintf(sociServiceDownloadURLFormat, SociVersion)
+
+	// Platform-specific DOCKER_CONFIG for SOCI service (macOS only)
+	// This is needed as DOCKER_CONFIG for SOCI defaults to ~/.finch/config,
+	// following similar behavior to nerdctl. However, since DOCKER_CONFIG for nerdctl
+	// now points to ~/.finch-vm-config to support a custom credential helper in Lima on macOS,
+	// SOCI must be updated to point to this new config to retain it's behavior.
+	// TODO: Update logic for "wsl2" case once wincred credential helper support is added.
+	dockerConfigSetup := ""
+	if *lca.cfg.VMType != "wsl2" {
+		dockerConfigSetup = `	sudo mkdir -p /etc/systemd/system/soci-snapshotter.service.d/
+	printf '[Service]\nEnvironment="DOCKER_CONFIG=$HOME/.finch-vm-config"\n' | ` +
+			`sudo tee /etc/systemd/system/soci-snapshotter.service.d/override.conf`
+	}
+
 	sociInstallationScript := fmt.Sprintf(sociInstallationScriptFormat, sociInstallationProvisioningScriptHeader,
-		sociFileName, sociDownloadURL, sociSha256Sum, sociServiceDownloadURL)
-	limaCfg.Provision = append(limaCfg.Provision, limayaml.Provision{
+		sociFileName, sociDownloadURL, sociSha256Sum, sociServiceDownloadURL, dockerConfigSetup)
+	limaCfg.Provision = append(limaCfg.Provision, limatype.Provision{
 		Mode:   "system",
-		Script: sociInstallationScript,
+		Script: &sociInstallationScript,
 	})
 }
 
-func ensureWslDiskFormatScript(limaCfg *limayaml.LimaYAML) {
+func ensureWslDiskFormatScript(limaCfg *limatype.LimaYAML) {
 	if hasScript := findWslDiskFormatScript(limaCfg); !hasScript {
-		limaCfg.Provision = append(limaCfg.Provision, limayaml.Provision{
-			Mode: "system",
-			Script: fmt.Sprintf(`%s
+		scriptContent := fmt.Sprintf(`%s
 #!/bin/bash
 mkdir -p /mnt/lima-finch
 mount "$(blkid -s TYPE -t LABEL=FinchDataDisk -o device)" /mnt/lima-finch
-`, wslDiskFormatScriptHeader),
+`, wslDiskFormatScriptHeader)
+		limaCfg.Provision = append(limaCfg.Provision, limatype.Provision{
+			Mode:   "system",
+			Script: &scriptContent,
 		})
 	}
 }
 
-func findWslDiskFormatScript(limaCfg *limayaml.LimaYAML) bool {
+func findWslDiskFormatScript(limaCfg *limatype.LimaYAML) bool {
 	hasWslDiskFormatScript := false
 	for _, prov := range limaCfg.Provision {
-		trimmed := strings.Trim(prov.Script, " ")
+		trimmed := strings.Trim(*prov.Script, " ")
 		if !hasWslDiskFormatScript && strings.HasPrefix(trimmed, wslDiskFormatScriptHeader) {
 			hasWslDiskFormatScript = true
 			break

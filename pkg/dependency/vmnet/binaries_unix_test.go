@@ -1,8 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
-// +build !windows
+//go:build darwin
 
 // Ensures that the binaries required for networking are installed in a privileged location.
 // More information here: https://github.com/lima-vm/socket_vmnet
@@ -17,10 +16,10 @@ import (
 	"github.com/runfinch/finch/pkg/mocks"
 	"github.com/runfinch/finch/pkg/path"
 
-	"github.com/golang/mock/gomock"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 const (
@@ -151,7 +150,6 @@ func TestBinaries_Installed(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -251,7 +249,6 @@ func TestBinaries_Install(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 

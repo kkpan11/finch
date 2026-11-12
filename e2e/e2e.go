@@ -30,7 +30,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 
 	"github.com/runfinch/common-tests/option"
 )
@@ -63,9 +66,40 @@ func CreateOption() (*option.Option, error) {
 		args = append(args, "--debug")
 	}
 
-	o, err := option.New(args)
+	mods := []option.Modifier{}
+	if runtime.GOOS == "linux" {
+		nerdctlVersion, err := getNerdctlVersion(subject)
+		if err != nil {
+			return nil, err
+		}
+		mods = append(mods, option.WithNerdctlVersion(nerdctlVersion))
+	}
+
+	o, err := option.New(args, mods...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize a testing option: %w", err)
 	}
+
+	// Explicitly pass GOCOVERDIR for coverage collection
+	// Use FINCH_GOCOVERDIR to avoid conflict with test process's GOCOVERDIR
+	if gocoverdir := os.Getenv("FINCH_GOCOVERDIR"); gocoverdir != "" {
+		o.UpdateEnv("GOCOVERDIR", gocoverdir)
+	}
+
 	return o, nil
+}
+
+func getNerdctlVersion(subject string) (string, error) {
+	output, err := exec.Command(subject, "version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to run version command: %w", err)
+	}
+	re := regexp.MustCompile(`(?m)nerdctl:\n\s*Version:\s*v(.*)$`)
+	matches := re.FindStringSubmatch(string(output))
+
+	if matches == nil || len(matches) != 2 {
+		return "", fmt.Errorf("regexp did not match properly, output: %s", output)
+	}
+
+	return matches[1], nil
 }

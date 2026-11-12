@@ -5,16 +5,17 @@ package support
 
 import (
 	"archive/zip"
+	"fmt"
 	"io"
 	"os/user"
 	"runtime"
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 
 	"github.com/runfinch/finch/pkg/mocks"
 	fpath "github.com/runfinch/finch/pkg/path"
@@ -25,14 +26,15 @@ func TestSupport_NewBundleBuilder(t *testing.T) {
 
 	ctrl := gomock.NewController(t)
 	ecc := mocks.NewCommandCreator(ctrl)
-	lcc := mocks.NewLimaCmdCreator(ctrl)
+	ncc := mocks.NewNerdctlCmdCreator(ctrl)
 	logger := mocks.NewLogger(ctrl)
 	fs := afero.NewMemMapFs()
 	finch := fpath.Finch("mockfinch")
 	lima := mocks.NewMockLimaWrapper(ctrl)
+	systemDeps := mocks.NewSupportSystemDeps(ctrl)
 
 	config := NewBundleConfig(finch, "mockhome")
-	NewBundleBuilder(logger, fs, config, finch, ecc, lcc, lima)
+	NewBundleBuilder(logger, fs, config, finch, ecc, ncc, lima, systemDeps)
 }
 
 func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
@@ -42,40 +44,54 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 		Username: "mockuser",
 	}
 
-	testCases := []struct {
+	type testcases []struct {
 		name    string
 		mockSvc func(
 			*mocks.Logger,
 			*mocks.BundleConfig,
 			*mocks.CommandCreator,
-			*mocks.LimaCmdCreator,
+			*mocks.NerdctlCmdCreator,
 			*mocks.Command,
 			*mocks.MockLimaWrapper,
+			*mocks.SupportSystemDeps,
 			afero.Fs,
 		)
 		include []string
 		exclude []string
-	}{
+	}
+
+	testCases := testcases{
 		{
 			name: "Generate support bundle",
 			mockSvc: func(
 				logger *mocks.Logger,
 				config *mocks.BundleConfig,
 				ecc *mocks.CommandCreator,
-				_ *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				cmd *mocks.Command,
 				lima *mocks.MockLimaWrapper,
+				systemDeps *mocks.SupportSystemDeps,
 				_ afero.Fs,
 			) {
 				logger.EXPECT().Debugf("Creating %s...", gomock.Any())
 				logger.EXPECT().Debugln("Gathering platform data...")
 
-				if runtime.GOOS == "windows" {
+				switch runtime.GOOS {
+				case "windows":
 					ecc.EXPECT().Create("cmd", "/c", "ver").Return(cmd)
-				} else {
+				case "darwin":
 					ecc.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				case "linux":
+					ecc.EXPECT().Create("uname", "-r").Return(cmd)
+				default:
+					cmd = nil
 				}
-				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil)
+
+				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil).AnyTimes()
+
+				logger.EXPECT().Debugln("Collecting finch version output...")
+				systemDeps.EXPECT().Executable().Return("/bin/path", nil)
+				ecc.EXPECT().Create("/bin/path", "version").Return(cmd)
 
 				config.EXPECT().LogFiles().Return([]string{
 					"log1",
@@ -90,12 +106,14 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 				logger.EXPECT().Debugln("Copying in log files...")
 				logger.EXPECT().Debugf("Copying %s...", "log1")
 				logger.EXPECT().Debugf("Copying %s...", "log2")
+				checkJournalCmdOutputs(logger, config, ecc, ncc, cmd, lima, mockUser)
+
 				logger.EXPECT().Debugln("Copying in config files...")
 				logger.EXPECT().Debugf("Copying %s...", "config1")
 				logger.EXPECT().Debugf("Copying %s...", "config2")
 				logger.EXPECT().Debugln("Copying in additional files...")
 
-				lima.EXPECT().LimaUser(false).Return(mockUser, nil).AnyTimes()
+				lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
 			},
 			include: []string{},
 			exclude: []string{},
@@ -106,20 +124,31 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 				logger *mocks.Logger,
 				config *mocks.BundleConfig,
 				ecc *mocks.CommandCreator,
-				_ *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				cmd *mocks.Command,
 				lima *mocks.MockLimaWrapper,
+				systemDeps *mocks.SupportSystemDeps,
 				_ afero.Fs,
 			) {
 				logger.EXPECT().Debugf("Creating %s...", gomock.Any())
 				logger.EXPECT().Debugln("Gathering platform data...")
 
-				if runtime.GOOS == "windows" {
+				switch runtime.GOOS {
+				case "windows":
 					ecc.EXPECT().Create("cmd", "/c", "ver").Return(cmd)
-				} else {
+				case "darwin":
 					ecc.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				case "linux":
+					ecc.EXPECT().Create("uname", "-r").Return(cmd)
+				default:
+					cmd = nil
 				}
-				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil)
+
+				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil).AnyTimes()
+
+				logger.EXPECT().Debugln("Collecting finch version output...")
+				systemDeps.EXPECT().Executable().Return("/bin/path", nil)
+				ecc.EXPECT().Create("/bin/path", "version").Return(cmd)
 
 				config.EXPECT().LogFiles().Return([]string{
 					"log1",
@@ -131,12 +160,14 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 
 				logger.EXPECT().Debugln("Copying in log files...")
 				logger.EXPECT().Debugf("Copying %s...", "log1")
+				checkJournalCmdOutputs(logger, config, ecc, ncc, cmd, lima, mockUser)
+
 				logger.EXPECT().Debugln("Copying in config files...")
 				logger.EXPECT().Debugf("Copying %s...", "config1")
 				logger.EXPECT().Debugln("Copying in additional files...")
 				logger.EXPECT().Debugf("Copying %s...", "extra1")
 
-				lima.EXPECT().LimaUser(false).Return(mockUser, nil).AnyTimes()
+				lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
 			},
 			include: []string{"extra1"},
 			exclude: []string{},
@@ -147,20 +178,31 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 				logger *mocks.Logger,
 				config *mocks.BundleConfig,
 				ecc *mocks.CommandCreator,
-				_ *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				cmd *mocks.Command,
 				lima *mocks.MockLimaWrapper,
+				systemDeps *mocks.SupportSystemDeps,
 				_ afero.Fs,
 			) {
 				logger.EXPECT().Debugf("Creating %s...", gomock.Any())
 				logger.EXPECT().Debugln("Gathering platform data...")
 
-				if runtime.GOOS == "windows" {
+				switch runtime.GOOS {
+				case "windows":
 					ecc.EXPECT().Create("cmd", "/c", "ver").Return(cmd)
-				} else {
+				case "darwin":
 					ecc.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				case "linux":
+					ecc.EXPECT().Create("uname", "-r").Return(cmd)
+				default:
+					cmd = nil
 				}
-				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil)
+
+				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil).AnyTimes()
+
+				logger.EXPECT().Debugln("Collecting finch version output...")
+				systemDeps.EXPECT().Executable().Return("/bin/path", nil)
+				ecc.EXPECT().Create("/bin/path", "version").Return(cmd)
 
 				config.EXPECT().LogFiles().Return([]string{
 					"log1",
@@ -172,11 +214,13 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 
 				logger.EXPECT().Debugln("Copying in log files...")
 				logger.EXPECT().Infof("Excluding %s...", "log1")
+				checkJournalCmdOutputs(logger, config, ecc, ncc, cmd, lima, mockUser)
+
 				logger.EXPECT().Debugln("Copying in config files...")
 				logger.EXPECT().Debugf("Copying %s...", "config1")
 				logger.EXPECT().Debugln("Copying in additional files...")
 
-				lima.EXPECT().LimaUser(false).Return(mockUser, nil).AnyTimes()
+				lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
 			},
 			include: []string{},
 			exclude: []string{"log1"},
@@ -187,20 +231,31 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 				logger *mocks.Logger,
 				config *mocks.BundleConfig,
 				ecc *mocks.CommandCreator,
-				_ *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				cmd *mocks.Command,
 				lima *mocks.MockLimaWrapper,
+				systemDeps *mocks.SupportSystemDeps,
 				_ afero.Fs,
 			) {
 				logger.EXPECT().Debugf("Creating %s...", gomock.Any())
 				logger.EXPECT().Debugln("Gathering platform data...")
 
-				if runtime.GOOS == "windows" {
+				switch runtime.GOOS {
+				case "windows":
 					ecc.EXPECT().Create("cmd", "/c", "ver").Return(cmd)
-				} else {
+				case "darwin":
 					ecc.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				case "linux":
+					ecc.EXPECT().Create("uname", "-r").Return(cmd)
+				default:
+					cmd = nil
 				}
-				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil)
+
+				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil).AnyTimes()
+
+				logger.EXPECT().Debugln("Collecting finch version output...")
+				systemDeps.EXPECT().Executable().Return("/bin/path", nil)
+				ecc.EXPECT().Create("/bin/path", "version").Return(cmd)
 
 				config.EXPECT().LogFiles().Return([]string{
 					"log1",
@@ -212,11 +267,13 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 
 				logger.EXPECT().Debugln("Copying in log files...")
 				logger.EXPECT().Debugf("Copying %s...", "log1")
+				checkJournalCmdOutputs(logger, config, ecc, ncc, cmd, lima, mockUser)
+
 				logger.EXPECT().Debugln("Copying in config files...")
 				logger.EXPECT().Infof("Excluding %s...", "config1")
 				logger.EXPECT().Debugln("Copying in additional files...")
 
-				lima.EXPECT().LimaUser(false).Return(mockUser, nil).AnyTimes()
+				lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
 			},
 			include: []string{},
 			exclude: []string{"config1"},
@@ -227,20 +284,31 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 				logger *mocks.Logger,
 				config *mocks.BundleConfig,
 				ecc *mocks.CommandCreator,
-				_ *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				cmd *mocks.Command,
 				lima *mocks.MockLimaWrapper,
+				systemDeps *mocks.SupportSystemDeps,
 				_ afero.Fs,
 			) {
 				logger.EXPECT().Debugf("Creating %s...", gomock.Any())
 				logger.EXPECT().Debugln("Gathering platform data...")
 
-				if runtime.GOOS == "windows" {
+				switch runtime.GOOS {
+				case "windows":
 					ecc.EXPECT().Create("cmd", "/c", "ver").Return(cmd)
-				} else {
+				case "darwin":
 					ecc.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				case "linux":
+					ecc.EXPECT().Create("uname", "-r").Return(cmd)
+				default:
+					cmd = nil
 				}
-				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil)
+
+				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil).AnyTimes()
+
+				logger.EXPECT().Debugln("Collecting finch version output...")
+				systemDeps.EXPECT().Executable().Return("/bin/path", nil)
+				ecc.EXPECT().Create("/bin/path", "version").Return(cmd)
 
 				config.EXPECT().LogFiles().Return([]string{
 					"log1",
@@ -252,36 +320,52 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 
 				logger.EXPECT().Debugln("Copying in log files...")
 				logger.EXPECT().Debugf("Copying %s...", "log1")
+				checkJournalCmdOutputs(logger, config, ecc, ncc, cmd, lima, mockUser)
+
 				logger.EXPECT().Debugln("Copying in config files...")
 				logger.EXPECT().Debugf("Copying %s...", "config1")
 				logger.EXPECT().Debugln("Copying in additional files...")
 				logger.EXPECT().Infof("Excluding %s...", "extra1")
 
-				lima.EXPECT().LimaUser(false).Return(mockUser, nil).AnyTimes()
+				lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
 			},
 			include: []string{"extra1"},
 			exclude: []string{"extra1"},
 		},
+	}
+
+	hasVMTestCases := testcases{
 		{
 			name: "Generate support bundle with a VM file included",
 			mockSvc: func(
 				logger *mocks.Logger,
 				config *mocks.BundleConfig,
 				ecc *mocks.CommandCreator,
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				cmd *mocks.Command,
 				lima *mocks.MockLimaWrapper,
+				systemDeps *mocks.SupportSystemDeps,
 				_ afero.Fs,
 			) {
 				logger.EXPECT().Debugf("Creating %s...", gomock.Any())
 				logger.EXPECT().Debugln("Gathering platform data...")
 
-				if runtime.GOOS == "windows" {
+				switch runtime.GOOS {
+				case "windows":
 					ecc.EXPECT().Create("cmd", "/c", "ver").Return(cmd)
-				} else {
+				case "darwin":
 					ecc.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				case "linux":
+					ecc.EXPECT().Create("uname", "-r").Return(cmd)
+				default:
+					cmd = nil
 				}
-				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil)
+
+				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil).AnyTimes()
+
+				logger.EXPECT().Debugln("Collecting finch version output...")
+				systemDeps.EXPECT().Executable().Return("/bin/path", nil)
+				ecc.EXPECT().Create("/bin/path", "version").Return(cmd)
 
 				config.EXPECT().LogFiles().Return([]string{
 					"log1",
@@ -293,6 +377,8 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 
 				logger.EXPECT().Debugln("Copying in log files...")
 				logger.EXPECT().Debugf("Copying %s...", "log1")
+				checkJournalCmdOutputs(logger, config, ecc, ncc, cmd, lima, mockUser)
+
 				logger.EXPECT().Debugln("Copying in config files...")
 				logger.EXPECT().Debugf("Copying %s...", "config1")
 				logger.EXPECT().Debugln("Copying in additional files...")
@@ -300,7 +386,7 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 
 				var catWriter io.Writer
 				waitChan := make(chan int)
-				lcc.EXPECT().CreateWithoutStdio("shell", "finch", "sudo", "cat", "extra1").Return(cmd)
+				ncc.EXPECT().CreateWithoutStdio("shell", "finch", "sudo", "cat", "extra1").Return(cmd)
 				cmd.EXPECT().SetStdout(gomock.Any()).Do(func(writer io.Writer) {
 					catWriter = writer
 				})
@@ -318,14 +404,78 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 					return nil
 				})
 
-				lima.EXPECT().LimaUser(false).Return(mockUser, nil).AnyTimes()
+				lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
 			},
 			include: []string{"vm:extra1"},
 		},
 	}
 
+	npVMTestCases := testcases{
+		{
+			name: "Generate support bundle with a VM file included",
+			mockSvc: func(
+				logger *mocks.Logger,
+				config *mocks.BundleConfig,
+				ecc *mocks.CommandCreator,
+				ncc *mocks.NerdctlCmdCreator,
+				cmd *mocks.Command,
+				lima *mocks.MockLimaWrapper,
+				systemDeps *mocks.SupportSystemDeps,
+				_ afero.Fs,
+			) {
+				logger.EXPECT().Debugf("Creating %s...", gomock.Any())
+				logger.EXPECT().Debugln("Gathering platform data...")
+
+				switch runtime.GOOS {
+				case "windows":
+					ecc.EXPECT().Create("cmd", "/c", "ver").Return(cmd)
+				case "darwin":
+					ecc.EXPECT().Create("sw_vers", "-productVersion").Return(cmd)
+				case "linux":
+					ecc.EXPECT().Create("uname", "-r").Return(cmd)
+				default:
+					cmd = nil
+				}
+
+				cmd.EXPECT().Output().Return([]byte("1.2.3\n"), nil).AnyTimes()
+
+				logger.EXPECT().Debugln("Collecting finch version output...")
+				systemDeps.EXPECT().Executable().Return("/bin/path", nil)
+				ecc.EXPECT().Create("/bin/path", "version").Return(cmd)
+
+				config.EXPECT().LogFiles().Return([]string{
+					"log1",
+				})
+
+				config.EXPECT().ConfigFiles().Return([]string{
+					"config1",
+				})
+
+				logger.EXPECT().Debugln("Copying in log files...")
+				logger.EXPECT().Debugf("Copying %s...", "log1")
+				checkJournalCmdOutputs(logger, config, ecc, ncc, cmd, lima, mockUser)
+
+				logger.EXPECT().Debugln("Copying in config files...")
+				logger.EXPECT().Debugf("Copying %s...", "config1")
+				logger.EXPECT().Debugln("Copying in additional files...")
+				logger.EXPECT().Debugf("Copying %s...", "vm:extra1")
+
+				// hard to write a matcher for the second argument
+				logger.EXPECT().Warnf("Could not add additional file %s. Error: %s", "vm:extra1", gomock.Any())
+
+				lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
+			},
+			include: []string{"vm:extra1"},
+		},
+	}
+
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		testCases = append(testCases, hasVMTestCases...)
+	} else {
+		testCases = append(testCases, npVMTestCases...)
+	}
+
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -335,18 +485,20 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 			config := mocks.NewBundleConfig(ctrl)
 			finch := fpath.Finch("mockfinch")
 			ecc := mocks.NewCommandCreator(ctrl)
-			lcc := mocks.NewLimaCmdCreator(ctrl)
+			ncc := mocks.NewNerdctlCmdCreator(ctrl)
 			lima := mocks.NewMockLimaWrapper(ctrl)
 			cmd := mocks.NewCommand(ctrl)
+			systemDeps := mocks.NewSupportSystemDeps(ctrl)
 
 			builder := &bundleBuilder{
-				logger: logger,
-				fs:     fs,
-				config: config,
-				finch:  finch,
-				ecc:    ecc,
-				lcc:    lcc,
-				lima:   lima,
+				logger:     logger,
+				fs:         fs,
+				config:     config,
+				finch:      finch,
+				ecc:        ecc,
+				ncc:        ncc,
+				lima:       lima,
+				systemDeps: systemDeps,
 			}
 
 			testFiles := []string{
@@ -366,9 +518,14 @@ func TestSupportBundleBuilder_GenerateSupportBundle(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			tc.mockSvc(logger, config, ecc, lcc, cmd, lima, fs)
+			tc.mockSvc(logger, config, ecc, ncc, cmd, lima, systemDeps, fs)
+			cfg := &BundleCfg{
+				AdditionalFiles: tc.include,
+				ExcludeFiles:    tc.exclude,
+				LogLines:        100,
+			}
 
-			zipFile, err := builder.GenerateSupportBundle(tc.include, tc.exclude)
+			zipFile, err := builder.GenerateSupportBundle(cfg)
 			assert.NoError(t, err)
 
 			exists, err := afero.Exists(fs, zipFile)
@@ -405,7 +562,6 @@ func TestSupport_writePlatformData(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -485,12 +641,143 @@ func TestSupport_fileShouldBeExcluded(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			result := fileShouldBeExcluded(tc.file, tc.exclude)
 			assert.Equal(t, tc.result, result)
 		})
+	}
+}
+
+func TestSupport_writeVersionOutput(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name            string
+		versionOutput   string
+		prefix          string
+		expectedPath    string
+		expectedContent string
+		expectError     bool
+	}{
+		{
+			name:            "Write version output successfully",
+			versionOutput:   "1.2.3",
+			prefix:          "test_prefix",
+			expectedPath:    "test_prefix/version-output.txt",
+			expectedContent: "1.2.3",
+			expectError:     false,
+		},
+		{
+			name:            "Write version output with empty prefix",
+			versionOutput:   "1.2.3",
+			prefix:          "",
+			expectedPath:    "version-output.txt",
+			expectedContent: "1.2.3",
+			expectError:     false,
+		},
+		{
+			name:            "Write empty output",
+			versionOutput:   "",
+			prefix:          "empty_version",
+			expectedPath:    "empty_version/version-output.txt",
+			expectedContent: "",
+			expectError:     false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fs := afero.NewMemMapFs()
+
+			file, err := fs.Create("testFile")
+			require.NoError(t, err)
+
+			writer := zip.NewWriter(file)
+
+			err = writeVersionOutput(writer, tc.versionOutput, tc.prefix)
+
+			// Check if we expected an error
+			if tc.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+
+			err = writer.Close()
+			assert.NoError(t, err)
+
+			err = file.Close()
+			assert.NoError(t, err)
+
+			// Open the zip archive for reading
+			readFile, err := fs.Open("testFile")
+			require.NoError(t, err)
+			defer readFile.Close() //nolint:errcheck // closing the file
+
+			fileInfo, err := readFile.Stat()
+			require.NoError(t, err)
+
+			reader, err := zip.NewReader(readFile, fileInfo.Size())
+			require.NoError(t, err)
+
+			// Check if the file exists in the zip
+			var found bool
+			for _, f := range reader.File {
+				if f.Name == tc.expectedPath {
+					found = true
+					rc, err := f.Open()
+					require.NoError(t, err)
+					defer rc.Close() //nolint:errcheck // closing the file
+
+					content, err := io.ReadAll(rc)
+					require.NoError(t, err)
+
+					// Check the file content
+					assert.Equal(t, tc.expectedContent, string(content))
+					break
+				}
+			}
+			assert.True(t, found, "Expected file not found in zip archive")
+		})
+	}
+}
+
+func checkJournalCmdOutputs(
+	logger *mocks.Logger,
+	config *mocks.BundleConfig,
+	ecc *mocks.CommandCreator,
+	ncc *mocks.NerdctlCmdCreator,
+	cmd *mocks.Command,
+	lima *mocks.MockLimaWrapper,
+	mockUser *user.User,
+) {
+	config.EXPECT().JournalServices().Return([]string{
+		"service:containerd",
+		"service:finch",
+		"service:buildkit",
+		"service:soci-snapshotter",
+	})
+
+	services := []string{"containerd", "finch", "buildkit", "soci-snapshotter"}
+	logger.EXPECT().Debugln("Copying in journal logs...")
+
+	for _, service := range services {
+		switch runtime.GOOS {
+		case "linux":
+			ecc.EXPECT().Create("journalctl", "-n", "100", "--no-pager", "-xu", service).Return(cmd)
+			logger.EXPECT().Debugf("Copying %s...", fmt.Sprintf("service:%s", service))
+		case "windows", "darwin":
+			logger.EXPECT().Debugf("Copying %s...", fmt.Sprintf("service:%s", service))
+			ncc.EXPECT().CreateWithoutStdio("shell", "finch", "sudo", "journalctl", "-n", "100", "--no-pager", "-xu", service).Return(cmd)
+			cmd.EXPECT().SetStdout(gomock.Any())
+			cmd.EXPECT().SetStderr(gomock.Any())
+			cmd.EXPECT().Start()
+			cmd.EXPECT().Wait()
+			lima.EXPECT().LimaUser(false).Return(mockUser).AnyTimes()
+		}
 	}
 }

@@ -1,4 +1,6 @@
 #!/bin/bash
+set -o errexit
+set -o pipefail
 
 packageUnsignedExecutables() {
     #initialize executable directory
@@ -15,7 +17,7 @@ packageUnsignedExecutables() {
     extractExecutables ./installer-builder/output/origin/_output
 
     #prepare unsigned executable into .tar
-    cd ./installer-builder/output/executables/unsigned/package || exit
+    cd ./installer-builder/output/executables/unsigned/package
     tar -cvzf artifact.gz -C artifact .
     tar -cvzf  ../package.tar.gz manifest.yaml artifact.gz
 }
@@ -36,7 +38,7 @@ updateQEMUEntitlement() {
 
 #$1: the file object
 extractExecutables() {
-    for file in $(ls -a "$1")
+    for file in $(ls -1a "$1")
     do
         if [ -d "$1/$file" ];
         then
@@ -44,7 +46,7 @@ extractExecutables() {
             then
                 extractExecutables "$1/$file"
             fi
-        elif [[ -x $1/$file || ($file == *.dylib && ! (-L $1/$file)) ]];
+        elif [[ -x $1/$file || (($file == *.dylib || $file == *.dylib.*) && ! (-L $1/$file)) ]];
         then
             #extract executables from all file directory to one folder
             #to have the ability to merge back, rename the executables with the file path
@@ -60,12 +62,6 @@ extractExecutables() {
             newpath="./installer-builder/output/executables/unsigned/package/artifact/EXECUTABLES_TO_SIGN/$newname"
             cp -a "$1/$file" "$newpath"
             codesign --remove-signature "$newpath"
-            "$(brew --prefix)"/opt/llvm/bin/llvm-objcopy \
-                --keep-undefined \
-                --add-section \
-                __TEXT,__info_plist=./installer-builder/darwin/Info.plist \
-                "$newpath" \
-                "$newpath"
             #qemu needs specific entitlement, handle it separately
             if [[ $file == "qemu-system-x86_64" || $file == "qemu-system-aarch64" ]];
             then

@@ -14,6 +14,8 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,9 +33,12 @@ import (
 const (
 	bundlePrefix     = "finch-support"
 	platformFileName = "platform.yaml"
+	versionFileName  = "version-output.txt"
 	logPrefix        = "logs"
+	journalPrefix    = "logs/journalctl"
 	configPrefix     = "configs"
 	additionalPrefix = "misc"
+	allServices      = "service:all"
 )
 
 // PlatformData defines the YAML structure for the platform data included in a support bundle.
@@ -43,19 +48,34 @@ type PlatformData struct {
 	Finch string `yaml:"finch"`
 }
 
+// BundleCfg has all the required args for generating support bundles.
+type BundleCfg struct {
+	AdditionalFiles []string
+	ExcludeFiles    []string
+	LogLines        int
+}
+
 // BundleBuilder provides methods to generate support bundles.
 type BundleBuilder interface {
-	GenerateSupportBundle([]string, []string) (string, error)
+	GenerateSupportBundle(*BundleCfg) (string, error)
+}
+
+// SystemDeps provides methods to get system dependencies.
+//
+//go:generate mockgen -copyright_file=../../copyright_header -destination=../mocks/pkg_support.go -package=mocks -mock_names SystemDeps=SupportSystemDeps . SystemDeps
+type SystemDeps interface {
+	system.ExecutableFinder
 }
 
 type bundleBuilder struct {
-	logger flog.Logger
-	fs     afero.Fs
-	config BundleConfig
-	finch  fpath.Finch
-	ecc    command.Creator
-	lcc    command.LimaCmdCreator
-	lima   wrapper.LimaWrapper
+	logger     flog.Logger
+	fs         afero.Fs
+	config     BundleConfig
+	finch      fpath.Finch
+	ecc        command.Creator
+	ncc        command.NerdctlCmdCreator
+	lima       wrapper.LimaWrapper
+	systemDeps SystemDeps
 }
 
 // NewBundleBuilder produces a new BundleBuilder.
@@ -65,22 +85,28 @@ func NewBundleBuilder(
 	config BundleConfig,
 	finch fpath.Finch,
 	ecc command.Creator,
-	lcc command.LimaCmdCreator,
+	ncc command.NerdctlCmdCreator,
 	lima wrapper.LimaWrapper,
+	systemDeps SystemDeps,
 ) BundleBuilder {
 	return &bundleBuilder{
-		logger: logger,
-		fs:     fs,
-		config: config,
-		finch:  finch,
-		ecc:    ecc,
-		lcc:    lcc,
-		lima:   lima,
+		logger:     logger,
+		fs:         fs,
+		config:     config,
+		finch:      finch,
+		ecc:        ecc,
+		ncc:        ncc,
+		lima:       lima,
+		systemDeps: systemDeps,
 	}
 }
 
 // GenerateSupportBundle generates a new support bundle.
-func (bb *bundleBuilder) GenerateSupportBundle(additionalFiles []string, excludeFiles []string) (string, error) {
+func (bb *bundleBuilder) GenerateSupportBundle(cfg *BundleCfg) (string, error) {
+	additionalFiles := cfg.AdditionalFiles
+	excludeFiles := cfg.ExcludeFiles
+	logLines := cfg.LogLines
+
 	zipFileName := bundleFileName()
 	bb.logger.Debugf("Creating %s...", zipFileName)
 	zipFile, err := bb.fs.Create(zipFileName)
@@ -108,6 +134,13 @@ func (bb *bundleBuilder) GenerateSupportBundle(additionalFiles []string, exclude
 		return "", err
 	}
 
+	bb.logger.Debugln("Collecting finch version output...")
+	version := bb.getFinchVersion()
+	err = writeVersionOutput(writer, version, zipPrefix)
+	if err != nil {
+		return "", err
+	}
+
 	bb.logger.Debugln("Copying in log files...")
 	for _, file := range bb.config.LogFiles() {
 		if fileShouldBeExcluded(file, excludeFiles) {
@@ -115,9 +148,26 @@ func (bb *bundleBuilder) GenerateSupportBundle(additionalFiles []string, exclude
 			continue
 		}
 		bb.logger.Debugf("Copying %s...", file)
-		err = bb.copyFileFromVMOrLocal(writer, file, path.Join(zipPrefix, logPrefix))
+		err = bb.copyFileFromVMOrLocal(writer, file, path.Join(zipPrefix, logPrefix), logLines)
 		if err != nil {
 			bb.logger.Warnf("Could not copy in %q. Error: %s", file, err)
+		}
+	}
+
+	if slices.Contains(excludeFiles, allServices) {
+		bb.logger.Info("Excluding all service logs...")
+	} else {
+		bb.logger.Debugln("Copying in journal logs...")
+		for _, file := range bb.config.JournalServices() {
+			if fileShouldBeExcluded(file, excludeFiles) {
+				bb.logger.Infof("Excluding %s...", file)
+				continue
+			}
+			bb.logger.Debugf("Copying %s...", file)
+			err = bb.copyFileFromVMOrLocal(writer, file, path.Join(zipPrefix, journalPrefix), logLines)
+			if err != nil {
+				bb.logger.Warnf("Could not copy in %q. Error: %s", file, err)
+			}
 		}
 	}
 
@@ -128,7 +178,7 @@ func (bb *bundleBuilder) GenerateSupportBundle(additionalFiles []string, exclude
 			continue
 		}
 		bb.logger.Debugf("Copying %s...", file)
-		err = bb.copyFileFromVMOrLocal(writer, file, path.Join(zipPrefix, configPrefix))
+		err = bb.copyFileFromVMOrLocal(writer, file, path.Join(zipPrefix, configPrefix), logLines)
 		if err != nil {
 			bb.logger.Warnf("Could not copy in %q. Error: %s", file, err)
 		}
@@ -141,7 +191,7 @@ func (bb *bundleBuilder) GenerateSupportBundle(additionalFiles []string, exclude
 			continue
 		}
 		bb.logger.Debugf("Copying %s...", file)
-		err = bb.copyFileFromVMOrLocal(writer, file, filepath.Join(zipPrefix, additionalPrefix))
+		err = bb.copyFileFromVMOrLocal(writer, file, filepath.Join(zipPrefix, additionalPrefix), logLines)
 		if err != nil {
 			bb.logger.Warnf("Could not add additional file %s. Error: %s", file, err)
 		}
@@ -159,11 +209,11 @@ type bufReader interface {
 	ReadBytes(delim byte) ([]byte, error)
 }
 
-func (bb *bundleBuilder) copyFileFromVMOrLocal(writer *zip.Writer, filename, zipPath string) error {
-	if isFileFromVM(filename) {
-		return bb.streamFileFromVM(writer, filename, zipPath)
+func (bb *bundleBuilder) copyFileFromVMOrLocal(writer *zip.Writer, filename, zipPath string, logLines int) error {
+	if runtime.GOOS != "linux" && (isFileFromVM(filename) || isService(filename)) {
+		return bb.streamFileFromVM(writer, filename, zipPath, logLines)
 	}
-	return bb.copyInFile(writer, filename, zipPath)
+	return bb.copyInFile(writer, filename, zipPath, logLines)
 }
 
 func (bb *bundleBuilder) copyAndRedactFile(writer io.Writer, reader bufReader) error {
@@ -181,10 +231,7 @@ func (bb *bundleBuilder) copyAndRedactFile(writer io.Writer, reader bufReader) e
 			return err
 		}
 
-		user, err := bb.lima.LimaUser(false)
-		if err != nil {
-			return err
-		}
+		user := bb.lima.LimaUser(false)
 		line, err = redactUsername(line, user.Username)
 		if err != nil {
 			return err
@@ -203,11 +250,24 @@ func (bb *bundleBuilder) copyAndRedactFile(writer io.Writer, reader bufReader) e
 	return nil
 }
 
-func (bb *bundleBuilder) copyInFile(writer *zip.Writer, fileName string, prefix string) error {
-	// check filename validity?
-	f, err := bb.fs.Open(fileName)
-	if err != nil {
-		return err
+func (bb *bundleBuilder) copyInFile(writer *zip.Writer, fileName string, prefix string, logLines int) error {
+	var f io.Reader
+	if isService(fileName) {
+		service := strings.TrimPrefix(fileName, "service:")
+		cmd := bb.ecc.Create("journalctl", "-n", strconv.Itoa(logLines), "--no-pager", "-xu", service)
+		out, err := cmd.Output()
+		if err != nil {
+			return err
+		}
+		f = bytes.NewReader(out)
+		fileName = service
+	} else {
+		var err error
+		// check filename validity?
+		f, err = bb.fs.Open(fileName)
+		if err != nil {
+			return err
+		}
 	}
 
 	baseName := filepath.Base(fileName)
@@ -224,12 +284,19 @@ func (bb *bundleBuilder) copyInFile(writer *zip.Writer, fileName string, prefix 
 	return bb.copyAndRedactFile(zipCopy, buf)
 }
 
-func (bb *bundleBuilder) streamFileFromVM(writer *zip.Writer, filename, prefix string) error {
+func (bb *bundleBuilder) streamFileFromVM(writer *zip.Writer, filename, prefix string, logLines int) error {
 	pipeReader, pipeWriter := io.Pipe()
 	errBuf := new(bytes.Buffer)
 
 	_, filePathInVM, _ := strings.Cut(filename, ":")
-	cmd := bb.lcc.CreateWithoutStdio("shell", "finch", "sudo", "cat", filePathInVM)
+	var cmd command.Command
+	if isService(filename) {
+		cmd = bb.ncc.CreateWithoutStdio("shell", "finch", "sudo", "journalctl", "-n", strconv.Itoa(logLines), "--no-pager", "-xu", filePathInVM)
+		// omit service prefix
+		filename = filePathInVM
+	} else {
+		cmd = bb.ncc.CreateWithoutStdio("shell", "finch", "sudo", "cat", filePathInVM)
+	}
 	cmd.SetStdout(pipeWriter)
 	cmd.SetStderr(errBuf)
 
@@ -288,11 +355,21 @@ func (bb *bundleBuilder) getPlatformData() (*PlatformData, error) {
 
 func (bb *bundleBuilder) getOSVersion() (string, error) {
 	var cmd command.Command
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		cmd = bb.ecc.Create("cmd", "/c", "ver")
-	} else {
+	case "darwin":
 		cmd = bb.ecc.Create("sw_vers", "-productVersion")
+	case "linux":
+		cmd = bb.ecc.Create("uname", "-r")
+	default:
+		cmd = nil
 	}
+
+	if cmd == nil {
+		return "unknown", nil
+	}
+
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -308,6 +385,21 @@ func (bb *bundleBuilder) getArch() string {
 
 func getFinchVersion() string {
 	return version.Version
+}
+
+func (bb *bundleBuilder) getFinchVersion() string {
+	// get current finch executable
+	executable, err := bb.systemDeps.Executable()
+	if err != nil {
+		return ""
+	}
+	cmd := bb.ecc.Create(executable, "version")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	output := string(out)
+	return output
 }
 
 func writePlatformData(writer *zip.Writer, platform *PlatformData, prefix string) error {
@@ -360,4 +452,22 @@ func fileShouldBeExcluded(filename string, exclude []string) bool {
 
 func isFileFromVM(filename string) bool {
 	return strings.HasPrefix(filename, "vm:")
+}
+
+func isService(filename string) bool {
+	return strings.HasPrefix(filename, "service:")
+}
+
+func writeVersionOutput(writer *zip.Writer, version, prefix string) error {
+	versionFile, err := writer.Create(path.Join(prefix, versionFileName))
+	if err != nil {
+		return err
+	}
+
+	_, err = versionFile.Write([]byte(version))
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

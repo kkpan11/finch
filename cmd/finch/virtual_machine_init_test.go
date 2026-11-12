@@ -1,20 +1,23 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build darwin || windows
+
 package main
 
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/runfinch/finch/pkg/dependency"
 	"github.com/runfinch/finch/pkg/flog"
 	"github.com/runfinch/finch/pkg/mocks"
 
-	"github.com/golang/mock/gomock"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 const mockBaseYamlFilePath = "/os/os.yaml"
@@ -22,7 +25,7 @@ const mockBaseYamlFilePath = "/os/os.yaml"
 func TestNewInitVMCommand(t *testing.T) {
 	t.Parallel()
 
-	cmd := newInitVMCommand(nil, nil, nil, nil, nil, "", nil, "", nil)
+	cmd := newInitVMCommand(nil, nil, nil, nil, nil, "", nil, "", nil, nil)
 	assert.Equal(t, cmd.Name(), "init")
 }
 
@@ -35,7 +38,7 @@ func TestInitVMAction_runAdapter(t *testing.T) {
 		args    []string
 		groups  func(*gomock.Controller) []*dependency.Group
 		mockSvc func(
-			*mocks.LimaCmdCreator,
+			*mocks.NerdctlCmdCreator,
 			*mocks.Logger,
 			*mocks.LimaConfigApplier,
 			*mocks.UserDataDiskManager,
@@ -60,47 +63,54 @@ func TestInitVMAction_runAdapter(t *testing.T) {
 				return groups
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				lca *mocks.LimaConfigApplier,
 				dm *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
 				command := mocks.NewCommand(ctrl)
-				lca.EXPECT().ConfigureDefaultLimaYaml().Return(nil)
+				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 				dm.EXPECT().DetachUserDataDisk().Return(nil)
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)
-				lcc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
-					mockBaseYamlFilePath, "--tty=false").Return(command)
+				ncc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
+					mockBaseYamlFilePath, "--tty=false", "--set", ".ssh.overVsock=false").Return(command)
 				command.EXPECT().CombinedOutput()
 
 				logger.EXPECT().Info("Initializing and starting Finch virtual machine...")
+				if runtime.GOOS == "windows" {
+					logger.EXPECT().Warnln("Finch on Windows uses WSL, which mounts the C Drive in read-write mode by default. " +
+						"To run finch with more restricted access, follow " +
+						"https://runfinch.com/docs/managing-finch/windows/wsl-configuration/")
+				}
+				logger.EXPECT().Warnln("Please note that Finch is a developer tool and is not meant for use in production environments, " +
+					"especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows " +
+					"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
 			},
 		},
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			ctrl := gomock.NewController(t)
 			logger := mocks.NewLogger(ctrl)
-			lcc := mocks.NewLimaCmdCreator(ctrl)
+			ncc := mocks.NewNerdctlCmdCreator(ctrl)
 			lca := mocks.NewLimaConfigApplier(ctrl)
 			dm := mocks.NewUserDataDiskManager(ctrl)
 
 			groups := tc.groups(ctrl)
-			tc.mockSvc(lcc, logger, lca, dm, ctrl)
+			tc.mockSvc(ncc, logger, lca, dm, ctrl)
 
-			assert.NoError(t, newInitVMAction(lcc, logger, groups, lca, mockBaseYamlFilePath, dm).runAdapter(tc.command, tc.args))
+			assert.NoError(t, newInitVMAction(ncc, logger, groups, lca, mockBaseYamlFilePath, dm, nil).runAdapter(tc.command, tc.args))
 		})
 	}
 }
@@ -113,7 +123,7 @@ func TestInitVMAction_run(t *testing.T) {
 		wantErr error
 		groups  func(*gomock.Controller) []*dependency.Group
 		mockSvc func(
-			*mocks.LimaCmdCreator,
+			*mocks.NerdctlCmdCreator,
 			*mocks.Logger,
 			*mocks.LimaConfigApplier,
 			*mocks.UserDataDiskManager,
@@ -127,28 +137,36 @@ func TestInitVMAction_run(t *testing.T) {
 				return nil
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				lca *mocks.LimaConfigApplier,
 				dm *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
-				lca.EXPECT().ConfigureDefaultLimaYaml().Return(nil)
+				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 				dm.EXPECT().DetachUserDataDisk().Return(nil)
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)
 
 				command := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
-					mockBaseYamlFilePath, "--tty=false").Return(command)
+				ncc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
+					mockBaseYamlFilePath, "--tty=false", "--set", ".ssh.overVsock=false").Return(command)
 				command.EXPECT().CombinedOutput()
 
 				logger.EXPECT().Info("Initializing and starting Finch virtual machine...")
+				if runtime.GOOS == "windows" {
+					logger.EXPECT().Warnln("Finch on Windows uses WSL, which mounts the C Drive in read-write mode by default. " +
+						"To run finch with more restricted access, follow " +
+						"https://runfinch.com/docs/managing-finch/windows/wsl-configuration/")
+				}
+				logger.EXPECT().Warnln("Please note that Finch is a developer tool and is not meant for use in production environments, " +
+					"especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows " +
+					"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
 			},
 		},
@@ -159,14 +177,14 @@ func TestInitVMAction_run(t *testing.T) {
 				return nil
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				_ *mocks.LimaConfigApplier,
 				_ *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte("Running"), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "Running")
 			},
@@ -180,14 +198,14 @@ func TestInitVMAction_run(t *testing.T) {
 				return nil
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				_ *mocks.LimaConfigApplier,
 				_ *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte("Stopped"), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "Stopped")
 			},
@@ -199,14 +217,14 @@ func TestInitVMAction_run(t *testing.T) {
 				return nil
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				_ *mocks.LimaConfigApplier,
 				_ *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte("Broken"), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "Broken")
 			},
@@ -218,14 +236,14 @@ func TestInitVMAction_run(t *testing.T) {
 				return nil
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				_ *mocks.Logger,
 				_ *mocks.LimaConfigApplier,
 				_ *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte("Broken"), errors.New("get status error"))
 			},
 		},
@@ -246,18 +264,18 @@ func TestInitVMAction_run(t *testing.T) {
 				return groups
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				lca *mocks.LimaConfigApplier,
 				dm *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
-				lca.EXPECT().ConfigureDefaultLimaYaml().Return(nil)
+				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 
 				logger.EXPECT().Errorf("Dependency error: %v",
@@ -269,11 +287,19 @@ func TestInitVMAction_run(t *testing.T) {
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)
 
 				command := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
-					mockBaseYamlFilePath, "--tty=false").Return(command)
+				ncc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
+					mockBaseYamlFilePath, "--tty=false", "--set", ".ssh.overVsock=false").Return(command)
 				command.EXPECT().CombinedOutput()
 
 				logger.EXPECT().Info("Initializing and starting Finch virtual machine...")
+				if runtime.GOOS == "windows" {
+					logger.EXPECT().Warnln("Finch on Windows uses WSL, which mounts the C Drive in read-write mode by default. " +
+						"To run finch with more restricted access, follow " +
+						"https://runfinch.com/docs/managing-finch/windows/wsl-configuration/")
+				}
+				logger.EXPECT().Warnln("Please note that Finch is a developer tool and is not meant for use in production environments, " +
+					"especially one running multi-tenant workloads. The virtual machine that Finch manages on macOS and Windows " +
+					"does not create a security boundary and exists for the sole purpose of running Linux containers on macOS and Windows.")
 				logger.EXPECT().Info("Finch virtual machine started successfully")
 			},
 		},
@@ -286,18 +312,18 @@ func TestInitVMAction_run(t *testing.T) {
 				return nil
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				lca *mocks.LimaConfigApplier,
 				_ *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
-				lca.EXPECT().ConfigureDefaultLimaYaml().Return(errors.New("load config fails"))
+				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(errors.New("load config fails"))
 			},
 		},
 
@@ -308,18 +334,18 @@ func TestInitVMAction_run(t *testing.T) {
 				return nil
 			},
 			mockSvc: func(
-				lcc *mocks.LimaCmdCreator,
+				ncc *mocks.NerdctlCmdCreator,
 				logger *mocks.Logger,
 				lca *mocks.LimaConfigApplier,
 				dm *mocks.UserDataDiskManager,
 				ctrl *gomock.Controller,
 			) {
 				getVMStatusC := mocks.NewCommand(ctrl)
-				lcc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
+				ncc.EXPECT().CreateWithoutStdio("ls", "-f", "{{.Status}}", limaInstanceName).Return(getVMStatusC)
 				getVMStatusC.EXPECT().Output().Return([]byte(""), nil)
 				logger.EXPECT().Debugf("Status of virtual machine: %s", "")
 
-				lca.EXPECT().ConfigureDefaultLimaYaml().Return(nil)
+				lca.EXPECT().ConfigureDefaultLimaYaml(logger).Return(nil)
 				lca.EXPECT().ConfigureOverrideLimaYaml().Return(nil)
 				dm.EXPECT().DetachUserDataDisk().Return(nil)
 				dm.EXPECT().EnsureUserDataDisk().Return(nil)
@@ -327,8 +353,8 @@ func TestInitVMAction_run(t *testing.T) {
 				logs := []byte("stdout + stderr")
 				command := mocks.NewCommand(ctrl)
 				command.EXPECT().CombinedOutput().Return(logs, errors.New("failed to init instance"))
-				lcc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
-					mockBaseYamlFilePath, "--tty=false").Return(command)
+				ncc.EXPECT().CreateWithoutStdio("start", fmt.Sprintf("--name=%s", limaInstanceName),
+					mockBaseYamlFilePath, "--tty=false", "--set", ".ssh.overVsock=false").Return(command)
 
 				logger.EXPECT().Info("Initializing and starting Finch virtual machine...")
 				logger.EXPECT().SetFormatter(flog.TextWithoutTruncation)
@@ -340,20 +366,19 @@ func TestInitVMAction_run(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			ctrl := gomock.NewController(t)
 			logger := mocks.NewLogger(ctrl)
-			lcc := mocks.NewLimaCmdCreator(ctrl)
+			ncc := mocks.NewNerdctlCmdCreator(ctrl)
 			lca := mocks.NewLimaConfigApplier(ctrl)
 			dm := mocks.NewUserDataDiskManager(ctrl)
 
 			groups := tc.groups(ctrl)
-			tc.mockSvc(lcc, logger, lca, dm, ctrl)
+			tc.mockSvc(ncc, logger, lca, dm, ctrl)
 
-			err := newInitVMAction(lcc, logger, groups, lca, mockBaseYamlFilePath, dm).run()
+			err := newInitVMAction(ncc, logger, groups, lca, mockBaseYamlFilePath, dm, nil).run()
 			assert.Equal(t, err, tc.wantErr)
 		})
 	}

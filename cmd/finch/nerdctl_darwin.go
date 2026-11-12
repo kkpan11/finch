@@ -20,11 +20,15 @@ func convertToWSLPath(_ NerdctlCommandSystemDeps, _ string) (string, error) {
 	return "", nil
 }
 
-var aliasMap = map[string]string{}
+var osAliasMap = map[string]string{}
 
-var argHandlerMap = map[string]map[string]argHandler{}
+var osArgHandlerMap = map[string]map[string]argHandler{}
 
-var commandHandlerMap = map[string]commandHandler{}
+var osCommandHandlerMap = map[string]commandHandler{}
+
+func (nc *nerdctlCommand) GetCmdArgs() []string {
+	return []string{"shell", limaInstanceName, "sudo", "-E"}
+}
 
 func resolveIP(host string, logger flog.Logger, _ command.Creator) (string, error) {
 	parts := strings.SplitN(host, ":", 2)
@@ -39,4 +43,18 @@ func resolveIP(host string, logger flog.Logger, _ command.Creator) (string, erro
 		return fmt.Sprintf("%s:%s", parts[0], resolvedIP), nil
 	}
 	return host, nil
+}
+
+func handleBindMountPath(_ NerdctlCommandSystemDeps, _ map[string]string) error {
+	// Do nothing by default
+	return nil
+}
+
+func mapToString(m map[string]string) string {
+	var parts []string
+	for k, v := range m {
+		part := fmt.Sprintf("%s=%s", k, v)
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ",")
 }

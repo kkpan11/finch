@@ -33,13 +33,18 @@ func TestVM(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// These steps also test the following state changes. This is not repeated in lifecycle test
+	// Test Stopped -> Nonexistent
+	// Test Nonexistent -> Running
 	ginkgo.SynchronizedBeforeSuite(func() []byte {
 		resetDisks(o, *e2e.Installed)
 		command.New(o, "vm", "stop", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(30).Run()
 		time.Sleep(1 * time.Second)
 		command.New(o, "vm", "remove", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(20).Run()
+		gomega.Expect(command.StdoutStr(o, virtualMachineRootCmd, "status")).To(gomega.Equal("Nonexistent"))
 		time.Sleep(1 * time.Second)
 		command.New(o, "vm", "init").WithoutCheckingExitCode().WithTimeoutInSeconds(160).Run()
+		gomega.Expect(command.StdoutStr(o, virtualMachineRootCmd, "status")).To(gomega.Equal("Running"))
 		return nil
 	}, func(_ []byte) {})
 
@@ -61,6 +66,7 @@ func TestVM(t *testing.T) {
 	})
 
 	ginkgo.Describe("", func() {
+		testVMPrune(o, *e2e.Installed)
 		testVMLifecycle(o)
 		testAdditionalDisk(o, *e2e.Installed)
 		testConfig(o, *e2e.Installed)
@@ -69,7 +75,13 @@ func TestVM(t *testing.T) {
 		testNonDefaultOptions(o, *e2e.Installed)
 		testSupportBundle(o)
 		testCredHelper(o, *e2e.Installed, *e2e.Registry)
+		testNativeCredHelper(o, *e2e.Installed)
 		testSoci(o, *e2e.Installed)
+		testVMNetwork(o, *e2e.Installed)
+		testDaemon(o, *e2e.Installed)
+		testVMDisk(o)
+		testDiskConfig(o, *e2e.Installed)
+		testAutoVMStart(o)
 	})
 
 	gomega.RegisterFailHandler(ginkgo.Fail)

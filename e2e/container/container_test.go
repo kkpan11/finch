@@ -5,12 +5,16 @@
 package container
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"testing"
 	"time"
 
+	ncdefaults "github.com/containerd/nerdctl/v2/pkg/defaults"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/runfinch/common-tests/command"
@@ -29,39 +33,74 @@ func TestContainer(t *testing.T) {
 	}
 
 	ginkgo.SynchronizedBeforeSuite(func() []byte {
-		command.New(o, "vm", "stop", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(30).Run()
-		time.Sleep(1 * time.Second)
-		command.New(o, "vm", "remove", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(20).Run()
-		time.Sleep(1 * time.Second)
-		command.New(o, "vm", "init").WithoutCheckingExitCode().WithTimeoutInSeconds(160).Run()
+		// Set DOCKER_CONFIG to /.finch
+		var finchConfigDir string
+		if runtime.GOOS == "windows" {
+			finchConfigDir = filepath.Clean(filepath.Join(os.Getenv("LOCALAPPDATA"), ".finch"))
+		} else {
+			homeDir, _ := os.UserHomeDir()
+			finchConfigDir = filepath.Clean(filepath.Join(homeDir, ".finch"))
+		}
+		_ = os.MkdirAll(finchConfigDir, 0o700)
+		o.UpdateEnv("DOCKER_CONFIG", finchConfigDir)
+		// Ensure empty /.finch/config.json
+		configPath := filepath.Join(finchConfigDir, "config.json")
+		_ = os.WriteFile(configPath, []byte("{}"), 0o644)
+
+		if runtime.GOOS != "linux" {
+			command.New(o, "vm", "stop", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(30).Run()
+			time.Sleep(1 * time.Second)
+			command.New(o, "vm", "remove", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(20).Run()
+			time.Sleep(1 * time.Second)
+			command.New(o, "vm", "init").WithoutCheckingExitCode().WithTimeoutInSeconds(160).Run()
+			// The WSL adapter only exists once the VM is running, and changes every time WSL restarts.
+			gomega.Expect(allowWSLToHostTraffic()).To(gomega.Succeed())
+		}
 		tests.SetupLocalRegistry(o)
 		return nil
 	}, func(_ []byte) {})
 
 	ginkgo.SynchronizedAfterSuite(func() {
-		command.New(o, "vm", "stop", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(30).Run()
-		time.Sleep(1 * time.Second)
-		command.New(o, "vm", "remove", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(20).Run()
-		time.Sleep(1 * time.Second)
+		if runtime.GOOS != "linux" {
+			command.New(o, "vm", "stop", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(30).Run()
+			time.Sleep(1 * time.Second)
+			command.New(o, "vm", "remove", "-f").WithoutCheckingExitCode().WithTimeoutInSeconds(20).Run()
+			time.Sleep(1 * time.Second)
+			if err := removeWSLToHostTraffic(); err != nil {
+				fmt.Printf("could not remove WSL to host firewall rule: %v\n", err)
+			}
+		}
 	}, func() {})
+
+	// get ip address for adapter vEthernet (WSL (Hyper-V firewall)) on Windows
+	var windowsHostIP string
+	if runtime.GOOS == "windows" {
+		n, err := exec.Command("cmd", "/C", "netsh", "interface", "ipv4", "show",
+			"addresses", "vEthernet (WSL (Hyper-V firewall))").Output()
+		if err != nil {
+			fmt.Printf("could not read vEthernet (WSL (Hyper-V firewall)) address: %v\n", err)
+		} else {
+			windowsHostIP = extractIPAddress(string(n))
+		}
+	}
 
 	ginkgo.Describe(description, func() {
 		tests.Pull(o)
 		tests.Rm(o)
 		tests.Rmi(o)
-		if runtime.GOOS == "windows" {
-			// get ip address for adapter vEthernet (WSL)
-			n, err := exec.Command("cmd", "/C", "netsh", "interface", "ipv4", "show",
-				"addresses", "vEthernet (WSL)").Output()
-			gomega.Expect(err).Should(gomega.BeNil())
-			hostIP := extractIPAddress(string(n))
+		switch runtime.GOOS {
+		case "windows":
 			// wsl2 cgroup v2 is mounted at /sys/fs/cgroup/unified,
 			// containerd expects it at /sys/fs/cgroup based on
 			// https://github.com/containerd/cgroups/blob/cc78c6c1e32dc5bde018d92999910fdace3cfa27/utils.go#L36
-			tests.Run(&tests.RunOption{BaseOpt: o, CGMode: tests.Hybrid, DefaultHostGatewayIP: hostIP})
-		} else {
+			tests.Run(&tests.RunOption{BaseOpt: o, CGMode: tests.Hybrid, DefaultHostGatewayIP: windowsHostIP})
+		case "darwin":
 			tests.Run(&tests.RunOption{BaseOpt: o, CGMode: tests.Unified, DefaultHostGatewayIP: "192.168.5.2"})
+		case "linux":
+			fmt.Printf("getCGroupMode(): %d\n", getCGroupMode())
+			tests.Run(&tests.RunOption{BaseOpt: o, CGMode: getCGroupMode(), DefaultHostGatewayIP: ncdefaults.HostGatewayIP()})
 		}
+
 		tests.Start(o)
 		tests.Stop(o)
 		tests.Cp(o)
@@ -101,7 +140,9 @@ func TestContainer(t *testing.T) {
 		tests.NetworkInspect(o)
 		tests.NetworkLs(o)
 		tests.NetworkRm(o)
+		tests.HealthCheck(o)
 		testCosign(o)
+		testCrossPlatformRun(o)
 	})
 
 	gomega.RegisterFailHandler(ginkgo.Fail)
